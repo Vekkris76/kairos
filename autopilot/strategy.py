@@ -88,6 +88,36 @@ class Strategy:
         from autopilot.indicators.macd import MACD
         self._indicators["macd"] = MACD(fast, slow, signal)
 
+    def add_stochastic(self, k: int = 14, d: int = 3) -> None:
+        """Add Stochastic Oscillator (%K, %D)."""
+        from autopilot.indicators.stochastic import Stochastic
+        self._indicators["stochastic"] = Stochastic(k, d)
+
+    def add_vwap(self) -> None:
+        """Add Volume Weighted Average Price."""
+        from autopilot.indicators.vwap import VWAP
+        self._indicators["vwap"] = VWAP()
+
+    def add_obv(self) -> None:
+        """Add On Balance Volume."""
+        from autopilot.indicators.obv import OBV
+        self._indicators["obv"] = OBV()
+
+    def add_donchian(self, period: int = 20) -> None:
+        """Add Donchian Channel."""
+        from autopilot.indicators.donchian import DonchianChannel
+        self._indicators["donchian"] = DonchianChannel(period)
+
+    def add_adx(self, period: int = 14) -> None:
+        """Add Average Directional Index."""
+        from autopilot.indicators.adx import ADX
+        self._indicators[f"adx_{period}"] = ADX(period)
+
+    def add_hma(self, period: int = 16) -> None:
+        """Add Hull Moving Average."""
+        from autopilot.indicators.hma import HMA
+        self._indicators[f"hma_{period}"] = HMA(period)
+
     # ── Indicator Accessors ───────────────────────────
 
     def ema(self, name: str) -> float:
@@ -119,6 +149,34 @@ class Strategy:
         if ind:
             return {"macd": ind.macd_value, "signal": ind.signal_value, "histogram": ind.histogram}
         return {"macd": 0, "signal": 0, "histogram": 0}
+
+    def stochastic(self) -> dict:
+        ind = self._indicators.get("stochastic")
+        if ind:
+            return {"k": ind.k, "d": ind.d}
+        return {"k": 50, "d": 50}
+
+    def vwap(self) -> float:
+        ind = self._indicators.get("vwap")
+        return ind.value if ind else 0.0
+
+    def obv(self) -> float:
+        ind = self._indicators.get("obv")
+        return ind.value if ind else 0.0
+
+    def donchian(self) -> dict:
+        ind = self._indicators.get("donchian")
+        if ind:
+            return {"upper": ind.upper, "lower": ind.lower, "middle": ind.middle}
+        return {"upper": 0, "lower": 0, "middle": 0}
+
+    def adx(self, period: int = 14) -> float:
+        ind = self._indicators.get(f"adx_{period}")
+        return ind.value if ind else 0.0
+
+    def hma(self, period: int = 16) -> float:
+        ind = self._indicators.get(f"hma_{period}")
+        return ind.value if ind else 0.0
 
     # ── Order Methods ─────────────────────────────────
 

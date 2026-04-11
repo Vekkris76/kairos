@@ -42,17 +42,28 @@ class BinanceAdapter(ExchangeAdapter):
         self._instruments: dict[str, Instrument] = {}
         self._ws_tasks: list[asyncio.Task] = []
         self._running = False
+        self._ws_stream = None
+        self._use_websocket = True  # Use WS instead of polling
 
     async def connect(self) -> None:
         await self._exchange.load_markets()
         self._running = True
+
+        # Initialize WebSocket stream
+        if self._use_websocket:
+            from autopilot.exchanges.binance_ws import BinanceWebSocket
+            self._ws_stream = BinanceWebSocket()
+
         logger.info(
             f"Binance connected — "
-            f"{len(self._exchange.markets)} markets loaded",
+            f"{len(self._exchange.markets)} markets loaded"
+            f" (WebSocket: {'enabled' if self._use_websocket else 'polling'})",
         )
 
     async def disconnect(self) -> None:
         self._running = False
+        if self._ws_stream:
+            await self._ws_stream.close()
         for task in self._ws_tasks:
             task.cancel()
         await self._exchange.close()
@@ -68,12 +79,17 @@ class BinanceAdapter(ExchangeAdapter):
             self._bar_callbacks[key] = []
         self._bar_callbacks[key].append(callback)
 
-        # Start WebSocket polling task for this pair
-        task = asyncio.create_task(
-            self._poll_bars(symbol, timeframe),
-        )
-        self._ws_tasks.append(task)
-        logger.info(f"Subscribed to {symbol} @ {timeframe}")
+        if self._use_websocket and self._ws_stream:
+            # Real-time WebSocket streaming
+            await self._ws_stream.subscribe(symbol, timeframe, callback)
+            logger.info(f"Subscribed to {symbol} @ {timeframe} (WebSocket)")
+        else:
+            # Fallback to REST polling
+            task = asyncio.create_task(
+                self._poll_bars(symbol, timeframe),
+            )
+            self._ws_tasks.append(task)
+            logger.info(f"Subscribed to {symbol} @ {timeframe} (polling)")
 
     async def _poll_bars(self, symbol: str, timeframe: str) -> None:
         """Poll for new bars (CCXT watch_ohlcv or fallback to REST)."""

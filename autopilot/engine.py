@@ -1,7 +1,6 @@
 """Autopilot Engine — multi-strategy trading engine.
 
-The main entry point. Manages strategies, exchange connection,
-data feed, orders, and risk validation.
+Connects all components: exchange, data, orders, risk, strategies.
 """
 
 from __future__ import annotations
@@ -11,9 +10,13 @@ import logging
 import signal
 from typing import Any
 
+from autopilot.data.cache import BarCache
 from autopilot.events import EventBus
+from autopilot.orders.manager import OrderManager
+from autopilot.orders.position import PositionTracker
+from autopilot.risk.validator import RiskValidator
 from autopilot.strategy import Strategy
-from autopilot.types import Bar, OrderSide
+from autopilot.types import Bar, Fill, OrderSide, OrderType
 
 logger = logging.getLogger("autopilot.engine")
 
@@ -33,160 +36,262 @@ class Engine:
         api_key: str = "",
         api_secret: str = "",
         base_currency: str = "USDC",
+        initial_balance: float = 1000.0,
         **kwargs: Any,
     ) -> None:
         self._exchange_name = exchange
         self._api_key = api_key
         self._api_secret = api_secret
         self._base_currency = base_currency
-        self._kwargs = kwargs
+        self._initial_balance = initial_balance
 
-        self._strategies: list[dict] = []  # [{strategy, symbol, timeframe}]
+        self._strategies: list[dict] = []
         self._events = EventBus()
+        self._cache = BarCache()
+        self._order_manager = OrderManager()
+        self._positions = PositionTracker()
+        self._risk = RiskValidator(**kwargs)
+        self._adapter = None
         self._running = False
-
-        # These are initialized in _setup()
-        self._adapter = None  # ExchangeAdapter
-        self._order_manager = None
-        self._position_tracker = None
-        self._risk_validator = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def add(
         self,
         strategy_cls: type[Strategy],
         symbol: str,
         timeframe: str = "1h",
-        **params: Any,
     ) -> None:
-        """Register a strategy to run on a symbol/timeframe."""
+        """Register a strategy on a symbol/timeframe."""
         self._strategies.append({
             "cls": strategy_cls,
             "symbol": symbol,
             "timeframe": timeframe,
-            "params": params,
+            "instance": None,
         })
-        logger.info(
-            f"Registered {strategy_cls.__name__} "
-            f"on {symbol} @ {timeframe}",
-        )
 
     def run(self) -> None:
-        """Start the engine (blocking). Handles SIGINT/SIGTERM."""
+        """Start the engine (blocking)."""
         logger.info(
-            f"Autopilot Engine starting "
-            f"({len(self._strategies)} strategies)",
+            f"Autopilot Engine v0.1 — "
+            f"{len(self._strategies)} strategies, "
+            f"exchange={self._exchange_name}",
         )
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
 
-        # Graceful shutdown
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._handle_signal)
+            self._loop.add_signal_handler(sig, self._stop)
 
         try:
-            loop.run_until_complete(self._run_async())
+            self._loop.run_until_complete(self._run_async())
         except KeyboardInterrupt:
             pass
         finally:
-            loop.run_until_complete(self._shutdown())
-            loop.close()
-            logger.info("Engine stopped")
+            self._loop.run_until_complete(self._shutdown())
+            self._loop.close()
 
     async def _run_async(self) -> None:
-        """Main async loop."""
-        await self._setup()
-        self._running = True
+        # 1. Create adapter
+        self._adapter = self._create_adapter()
+        await self._adapter.connect()
+        self._adapter.on_fill(self._on_fill)
 
-        logger.info("Engine RUNNING — waiting for bars...")
+        # 2. Init strategies
+        for entry in self._strategies:
+            inst = entry["cls"]()
+            inst._bind(self, entry["symbol"], entry["timeframe"])
+            inst.setup()
+            entry["instance"] = inst
+
+        # 3. Subscribe bars
+        subs = set()
+        for entry in self._strategies:
+            key = f"{entry['symbol']}:{entry['timeframe']}"
+            if key not in subs:
+                await self._adapter.subscribe_bars(
+                    entry["symbol"], entry["timeframe"], self._on_bar,
+                )
+                subs.add(key)
+
+        self._running = True
+        logger.info("Engine RUNNING")
 
         while self._running:
-            await self._events.process()
+            await self._events.drain()
+            await asyncio.sleep(0.1)
 
-    async def _setup(self) -> None:
-        """Initialize all components."""
-        # TODO: Initialize exchange adapter, order manager, etc.
-        # For now, create strategy instances and bind them
+    def _create_adapter(self):
+        if self._exchange_name == "binance":
+            from autopilot.exchanges.binance import BinanceAdapter
+            return BinanceAdapter(self._api_key, self._api_secret)
+        from autopilot.exchanges.paper import PaperAdapter
+        return PaperAdapter(
+            initial_balances={self._base_currency: self._initial_balance},
+        )
+
+    def _on_bar(self, bar: Bar) -> None:
+        """New bar received — update indicators and call strategies."""
+        self._cache.add(bar)
         for entry in self._strategies:
-            instance = entry["cls"]()
-            instance._bind(self, entry["symbol"], entry["timeframe"])
-            instance.setup()
-            entry["instance"] = instance
-            logger.info(
-                f"Strategy {entry['cls'].__name__} ready "
-                f"on {entry['symbol']}",
-            )
+            inst = entry.get("instance")
+            if not inst or entry["symbol"] != bar.symbol:
+                continue
+            if entry["timeframe"] != bar.timeframe:
+                continue
+            inst._update_indicators(bar)
+            if inst.indicators_ready:
+                try:
+                    inst.on_bar(bar)
+                except Exception as e:
+                    logger.error(f"Strategy error: {e}")
+
+    def _on_fill(self, fill: Fill) -> None:
+        """Order filled — update positions, notify strategies."""
+        price = self._cache.last_price(fill.symbol)
+        self._positions.update(fill, price)
+
+        to_cancel = self._order_manager.process_fill(fill)
+        for oid in to_cancel:
+            if self._loop and self._adapter:
+                self._loop.create_task(
+                    self._adapter.cancel_order(fill.symbol, oid),
+                )
+
+        for entry in self._strategies:
+            inst = entry.get("instance")
+            if inst and entry["symbol"] == fill.symbol:
+                try:
+                    inst.on_fill(fill)
+                except Exception as e:
+                    logger.error(f"on_fill error: {e}")
+
+    def _stop(self) -> None:
+        logger.info("Shutdown signal")
+        self._running = False
 
     async def _shutdown(self) -> None:
-        """Graceful shutdown — cancel orders, close connections."""
         self._running = False
         for entry in self._strategies:
-            instance = entry.get("instance")
-            if instance:
-                instance.on_stop()
-        logger.info("Shutdown complete")
+            inst = entry.get("instance")
+            if inst:
+                try:
+                    inst.on_stop()
+                except Exception:
+                    pass
+        if self._adapter:
+            await self._adapter.disconnect()
+        logger.info("Engine stopped")
 
-    def _handle_signal(self) -> None:
-        """Handle SIGINT/SIGTERM."""
-        logger.info("Received shutdown signal")
-        self._running = False
-
-    # ── Order Submission (called by Strategy) ─────────
+    # ── Called by Strategy ────────────────────────────
 
     def _submit_market_order(
         self, symbol: str, side: OrderSide, pct: float,
     ) -> bool:
-        """Submit a market order. Called by Strategy.buy()/sell_all()."""
-        # TODO: Implement with exchange adapter
-        logger.info(f"ORDER: {side.value} {pct}% {symbol}")
+        price = self._cache.last_price(symbol)
+        if price <= 0 or not self._adapter or not self._loop:
+            return False
+
+        bal = self._loop.run_until_complete(self._adapter.get_balances())
+        free = bal.get(self._base_currency)
+        if not free or free.free <= 0:
+            return False
+
+        inst = self._loop.run_until_complete(
+            self._adapter.get_instrument(symbol),
+        )
+
+        qty = (free.free * pct / 100) / price
+        qty = int(qty / inst.qty_step) * inst.qty_step
+
+        error = self._risk.validate_order(
+            symbol, side, qty, price, inst, bal,
+        )
+        if error:
+            logger.info(f"Rejected: {error}")
+            return False
+
+        self._loop.create_task(
+            self._adapter.submit_order(symbol, side, OrderType.MARKET, qty),
+        )
         return True
 
     def _submit_sell_all(self, symbol: str) -> bool:
-        """Sell entire position. Called by Strategy.sell_all()."""
-        # TODO: Implement
-        logger.info(f"ORDER: SELL ALL {symbol}")
+        pos = self._positions.get(symbol)
+        if not pos.is_open or not self._loop:
+            return False
+        self._loop.create_task(
+            self._adapter.submit_order(
+                symbol, OrderSide.SELL, OrderType.MARKET, pos.quantity,
+            ),
+        )
         return True
 
     def _submit_limit_order(
         self, symbol: str, side: OrderSide, price: float,
         pct: float | None = None, qty: float | None = None,
     ) -> str | None:
-        """Submit a limit order. Returns order_id."""
-        # TODO: Implement
-        logger.info(f"ORDER: {side.value} LIMIT {symbol} @ {price}")
-        return None
+        if not self._loop or not self._adapter:
+            return None
+        if qty is None and pct:
+            free = self._get_free_balance(self._base_currency)
+            qty = (free * pct / 100) / price if price > 0 else 0
+        if not qty or qty <= 0:
+            return None
+        self._loop.create_task(
+            self._adapter.submit_order(
+                symbol, side, OrderType.LIMIT, qty, price=price,
+            ),
+        )
+        return "pending"
 
     def _submit_bracket_order(
         self, symbol: str, pct: float,
         sl_distance: float, tp_distance: float,
     ) -> bool:
-        """Submit bracket order (entry + SL + TP)."""
-        # TODO: Implement
-        logger.info(
-            f"ORDER: BRACKET BUY {pct}% {symbol} "
-            f"SL={sl_distance} TP={tp_distance}",
-        )
+        price = self._cache.last_price(symbol)
+        if price <= 0:
+            return False
+        ok = self._submit_market_order(symbol, OrderSide.BUY, pct)
+        if not ok:
+            return False
+        pos = self._positions.get(symbol)
+        qty = pos.quantity
+        if self._loop and self._adapter:
+            self._loop.create_task(self._adapter.submit_order(
+                symbol, OrderSide.SELL, OrderType.STOP_MARKET,
+                qty, stop_price=price - sl_distance,
+            ))
+            self._loop.create_task(self._adapter.submit_order(
+                symbol, OrderSide.SELL, OrderType.LIMIT,
+                qty, price=price + tp_distance,
+            ))
         return True
 
     def _cancel_order(self, order_id: str) -> bool:
-        """Cancel an open order."""
-        # TODO: Implement
-        return True
-
-    # ── Portfolio Queries (called by Strategy) ────────
-
-    def _get_free_balance(self, currency: str) -> float:
-        # TODO: Implement
-        return 0.0
-
-    def _has_position(self, symbol: str) -> bool:
-        # TODO: Implement
+        order = self._order_manager.get_order(order_id)
+        if order and self._loop and self._adapter:
+            self._loop.create_task(
+                self._adapter.cancel_order(order.symbol, order_id),
+            )
+            return True
         return False
 
+    def _get_free_balance(self, currency: str) -> float:
+        if not self._loop or not self._adapter:
+            return 0.0
+        try:
+            bal = self._loop.run_until_complete(self._adapter.get_balances())
+            b = bal.get(currency)
+            return b.free if b else 0.0
+        except Exception:
+            return 0.0
+
+    def _has_position(self, symbol: str) -> bool:
+        return self._positions.get(symbol).is_open
+
     def _get_position_qty(self, symbol: str) -> float:
-        # TODO: Implement
-        return 0.0
+        return self._positions.get(symbol).quantity
 
     def _get_position_pnl(self, symbol: str) -> float:
-        # TODO: Implement
-        return 0.0
+        return self._positions.get(symbol).unrealized_pnl

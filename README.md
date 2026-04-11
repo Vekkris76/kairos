@@ -122,7 +122,7 @@ MIT — do whatever you want. See [LICENSE](LICENSE).
 
 ### What's Next
 
-- [ ] WebSocket streaming (currently REST polling)
+- [x] WebSocket streaming (real-time via Binance WS)
 - [ ] More exchanges (Bybit, Kraken, OKX)
 - [ ] Strategy marketplace
 - [ ] Web-based strategy builder

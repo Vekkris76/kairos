@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
@@ -276,6 +277,3 @@ class _BacktestEngineProxy:
 
     def _cancel_order(self, *a):
         return False
-
-
-import asyncio

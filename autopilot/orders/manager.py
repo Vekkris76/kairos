@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from autopilot.types import Fill, Order, OrderSide, OrderStatus
+from autopilot.types import Fill, Order, OrderStatus
 
 logger = logging.getLogger("autopilot.orders")
 

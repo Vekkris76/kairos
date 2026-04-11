@@ -28,6 +28,7 @@ class PositionTracker:
             # Adding to position
             if pos.quantity == 0:
                 pos.avg_entry = fill.price
+                pos.quantity = fill.quantity
             else:
                 # Volume-weighted average
                 total_cost = pos.avg_entry * pos.quantity + fill.price * fill.quantity

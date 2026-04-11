@@ -113,9 +113,17 @@ MIT — do whatever you want. See [LICENSE](LICENSE).
 
 ## Roadmap
 
-- [x] v0.1 — Engine + Binance + basic orders + indicators
-- [ ] v0.2 — Multi-strategy + risk engine
-- [ ] v0.3 — Backtesting engine + Parquet catalog
-- [ ] v0.4 — Production hardening (reconciliation, recovery)
-- [ ] v0.5 — PyPI release + documentation
-- [ ] v1.0 — Community launch
+- [x] v0.1 — Engine + Binance + basic orders + 12 indicators
+- [x] v0.2 — Multi-strategy + risk engine
+- [x] v0.3 — Backtesting engine + Parquet data catalog
+- [x] v0.4 — Production hardening (reconciliation, state recovery, reconnect)
+- [x] v0.5 — PyPI release + documentation + CI/CD
+- [x] v1.0 — Community launch 🎉
+
+### What's Next
+
+- [ ] WebSocket streaming (currently REST polling)
+- [ ] More exchanges (Bybit, Kraken, OKX)
+- [ ] Strategy marketplace
+- [ ] Web-based strategy builder
+- [ ] Performance analytics dashboard

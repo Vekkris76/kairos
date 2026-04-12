@@ -1,6 +1,6 @@
 [project]
 name = "kairos-engine"
-version = "0.2.0a0"
+version = "0.2.0a1"
 description = "Kairos — adaptive crypto trading engine. Curates the best of the open-source ecosystem and adds a learning layer on top."
 readme = "README.md"
 license = { text = "MIT" }   # under review for v1.0; v0.1.x and v0.2.x stay MIT

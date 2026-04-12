@@ -24,15 +24,14 @@ implements the same protocol with deterministic in-memory state.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import uuid
 from typing import Any
 
 from kairos.adapters.base import (
     BarCallback,
     DisconnectCallback,
     FillCallback,
-    LiveAdapter,
     OrderUpdateCallback,
     ReconnectCallback,
     TickCallback,
@@ -49,6 +48,44 @@ from kairos.types import (
 )
 
 logger = logging.getLogger("kairos.adapter.binance")
+
+# REST + WS endpoints — testnet vs prod
+_BINANCE_REST_PROD = "https://api.binance.com"
+_BINANCE_REST_TEST = "https://testnet.binance.vision"
+_BINANCE_WS_PROD = "wss://stream.binance.com:9443/ws"
+_BINANCE_WS_TEST = "wss://stream.testnet.binance.vision/ws"
+
+# Binance sends a listenKey that expires 60 min after its last keepalive.
+# We refresh every 30 min per Binance's own recommendation.
+_LISTEN_KEY_KEEPALIVE_SECONDS = 30 * 60
+
+
+def _map_binance_order_status(status: str | None) -> OrderStatus:
+    """Map Binance's order-status string to our OrderStatus enum."""
+    m = {
+        "NEW": OrderStatus.ACCEPTED,
+        "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
+        "FILLED": OrderStatus.FILLED,
+        "CANCELED": OrderStatus.CANCELLED,
+        "PENDING_CANCEL": OrderStatus.CANCELLED,
+        "REJECTED": OrderStatus.REJECTED,
+        "EXPIRED": OrderStatus.CANCELLED,
+    }
+    return m.get(status or "", OrderStatus.SUBMITTED)
+
+
+def _map_binance_order_type(otype: str | None) -> OrderType:
+    """Map Binance's order-type string to our OrderType enum."""
+    m = {
+        "MARKET": OrderType.MARKET,
+        "LIMIT": OrderType.LIMIT,
+        "LIMIT_MAKER": OrderType.LIMIT,
+        "STOP_LOSS": OrderType.STOP_MARKET,
+        "STOP_LOSS_LIMIT": OrderType.STOP_LIMIT,
+        "TAKE_PROFIT": OrderType.STOP_MARKET,
+        "TAKE_PROFIT_LIMIT": OrderType.STOP_LIMIT,
+    }
+    return m.get(otype or "", OrderType.MARKET)
 
 
 class BinanceLive:
@@ -92,11 +129,20 @@ class BinanceLive:
         self._user_ws: Any = None
         self._user_ws_task: asyncio.Task | None = None
         self._user_ws_listen_key: str | None = None
+        self._keepalive_task: asyncio.Task | None = None
 
         # Reconnect with backoff (pattern adapted from hummingbot v1.25,
         # see CREDITS.md → "WebSocket reconnect with backoff")
         self._reconnect_base_delay: float = 1.0
         self._reconnect_max_delay: float = 60.0
+
+    # ── Endpoint resolution ───────────────────────────────────────
+
+    def _rest_base(self) -> str:
+        return _BINANCE_REST_TEST if self._testnet else _BINANCE_REST_PROD
+
+    def _ws_base(self) -> str:
+        return _BINANCE_WS_TEST if self._testnet else _BINANCE_WS_PROD
 
     @property
     def connected(self) -> bool:
@@ -127,16 +173,20 @@ class BinanceLive:
         # Market WS subscriptions are added on demand in subscribe_bars
 
         # User-data WS — fills + order updates. Set up the listenKey then
-        # start the dedicated stream task.
+        # start the dedicated stream task + keepalive task.
         try:
             self._user_ws_listen_key = await self._fetch_listen_key()
             self._user_ws_task = asyncio.create_task(
                 self._run_user_ws(), name="binance-user-ws",
             )
+            self._keepalive_task = asyncio.create_task(
+                self._keepalive_listen_key(),
+                name="binance-listenkey-keepalive",
+            )
         except Exception as exc:
-            # Testnet has known issues with listenKey (returns 410). Warn
-            # but continue: market data still works, fills will be
-            # discovered by reconciliation rather than streamed.
+            # Testnet historically had issues with listenKey (returns 410).
+            # Warn but continue: market data still works, fills will be
+            # discovered by reconciliation polling.
             logger.warning(
                 f"BinanceLive: user-data WS init failed ({exc}). "
                 f"Fills will arrive only via reconciliation polling."
@@ -151,12 +201,27 @@ class BinanceLive:
             return
         self._connected = False
 
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         if self._user_ws_task is not None:
             self._user_ws_task.cancel()
             try:
                 await self._user_ws_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+        # Politely release listenKey if we have one
+        if self._user_ws_listen_key is not None:
+            try:
+                await self._close_listen_key(self._user_ws_listen_key)
+            except Exception:
+                pass
+            self._user_ws_listen_key = None
 
         if self._market_ws is not None:
             try:
@@ -279,15 +344,59 @@ class BinanceLive:
     async def _fetch_listen_key(self) -> str:
         """Request a Binance listenKey (gateway to the user-data WS).
 
-        Binance testnet returns 410 Gone here — known issue. Caller handles
-        the exception and continues with reconciliation-only mode.
+        Binance spot testnet historically returned 410 Gone here; current
+        ``testnet.binance.vision`` returns a valid key. If it fails, caller
+        catches the exception and continues with reconciliation-only mode.
         """
-        # Implementation hook — full Binance REST client integration lands
-        # in the v0.2.0 final adapter PR. For this skeleton we raise so
-        # tests can stub it.
-        raise NotImplementedError(
-            "BinanceLive._fetch_listen_key wires up in v0.2.0 final"
-        )
+        import httpx
+
+        url = f"{self._rest_base()}/api/v3/userDataStream"
+        headers = {"X-MBX-APIKEY": self._api_key}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            key = data.get("listenKey")
+            if not key:
+                raise RuntimeError(
+                    f"BinanceLive: listenKey missing from response: {data}"
+                )
+            logger.debug(f"BinanceLive: fetched listenKey ({len(key)} chars)")
+            return key
+
+    async def _keepalive_listen_key(self) -> None:
+        """Ping Binance every 30 min to keep the listenKey alive."""
+        import httpx
+
+        while self._connected and self._user_ws_listen_key is not None:
+            try:
+                await asyncio.sleep(_LISTEN_KEY_KEEPALIVE_SECONDS)
+            except asyncio.CancelledError:
+                return
+            if not self._connected or self._user_ws_listen_key is None:
+                return
+            try:
+                url = f"{self._rest_base()}/api/v3/userDataStream"
+                headers = {"X-MBX-APIKEY": self._api_key}
+                params = {"listenKey": self._user_ws_listen_key}
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.put(url, headers=headers, params=params)
+                    resp.raise_for_status()
+                logger.debug("BinanceLive: listenKey keepalive OK")
+            except Exception as exc:
+                # Don't kill the task — keep trying. If the key is truly
+                # dead, _user_ws_session will reconnect with a fresh one.
+                logger.warning(f"BinanceLive: listenKey keepalive failed: {exc}")
+
+    async def _close_listen_key(self, listen_key: str) -> None:
+        """DELETE the listenKey (polite cleanup on disconnect)."""
+        import httpx
+
+        url = f"{self._rest_base()}/api/v3/userDataStream"
+        headers = {"X-MBX-APIKEY": self._api_key}
+        params = {"listenKey": listen_key}
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.delete(url, headers=headers, params=params)
 
     async def _run_user_ws(self) -> None:
         """Long-running task: maintain the user-data WS, forward fills.
@@ -317,10 +426,94 @@ class BinanceLive:
                     await self._on_reconnect(self.venue_id)
 
     async def _user_ws_session(self) -> None:
-        """One iteration of the user-data WS — open, drain, close.
+        """One iteration of the user-data WS — open, drain, exit on close.
 
-        Implementation hook for v0.2.0 final.
+        Connects to ``wss://.../ws/{listenKey}``, reads frames until the
+        socket closes, and dispatches each ``executionReport`` event to
+        the fill + order-update callbacks. Returning from this coroutine
+        signals ``_run_user_ws`` to reconnect with a fresh listenKey.
         """
-        raise NotImplementedError(
-            "BinanceLive._user_ws_session wires up in v0.2.0 final"
+        import websockets
+
+        # Ensure we have a fresh listenKey on every session (after reconnect
+        # the old key may be invalidated). No-op if one already exists.
+        if self._user_ws_listen_key is None:
+            self._user_ws_listen_key = await self._fetch_listen_key()
+
+        url = f"{self._ws_base()}/{self._user_ws_listen_key}"
+        logger.info(
+            f"BinanceLive: user-data WS connecting (testnet={self._testnet})"
         )
+
+        async with websockets.connect(
+            url, ping_interval=30, ping_timeout=10,
+        ) as ws:
+            logger.info("BinanceLive: user-data WS connected")
+            async for raw in ws:
+                if not self._connected:
+                    break
+                try:
+                    await self._process_user_ws_message(raw)
+                except Exception:
+                    # Log + continue — one bad frame shouldn't tear down WS
+                    logger.exception(
+                        "BinanceLive: error processing user-data frame"
+                    )
+
+        # WS closed — let the caller reconnect. Invalidate our listenKey
+        # so the next session fetches a fresh one.
+        self._user_ws_listen_key = None
+
+    async def _process_user_ws_message(self, raw: str | bytes) -> None:
+        """Parse one user-data WS frame; emit Fill + Order updates.
+
+        Binance ``executionReport`` fields (spot stream) — keys we care about:
+        ``e`` event type, ``s`` symbol, ``S`` side, ``o`` order type,
+        ``X`` current order status, ``x`` current execution type,
+        ``i`` order id, ``t`` trade id, ``L`` last executed price,
+        ``l`` last executed qty, ``n`` commission, ``T`` transaction time,
+        ``q`` original qty, ``p`` original price.
+
+        Spec: https://developers.binance.com/docs/binance-spot-api-docs/user-data-stream
+        """
+        data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        if data.get("e") != "executionReport":
+            # Ignore outboundAccountPosition, balanceUpdate, listStatus etc.
+            return
+
+        symbol = data.get("s", "")
+        side = OrderSide.BUY if data.get("S") == "BUY" else OrderSide.SELL
+        exec_type = data.get("x")       # NEW, TRADE, CANCELED, EXPIRED, REJECTED
+        order_status = data.get("X")    # NEW, PARTIALLY_FILLED, FILLED, ...
+
+        # A fill arrives when exec_type == "TRADE". Binance emits one frame
+        # per execution, including partial fills.
+        if exec_type == "TRADE" and self._on_fill is not None:
+            last_qty = float(data.get("l", 0) or 0)
+            last_price = float(data.get("L", 0) or 0)
+            if last_qty > 0 and last_price > 0:
+                fill = Fill(
+                    order_id=str(data.get("i", "")),
+                    trade_id=str(data.get("t", "")),
+                    symbol=symbol,
+                    side=side,
+                    price=last_price,
+                    quantity=last_qty,
+                    commission=float(data.get("n", 0) or 0),
+                    timestamp=int(data.get("T", 0) or 0),
+                )
+                await self._on_fill(fill)
+
+        # Emit an order-state update on every frame (NEW → ACCEPTED,
+        # TRADE → PARTIALLY_FILLED / FILLED, CANCELED → CANCELLED, etc).
+        if self._on_order_update is not None:
+            order = Order(
+                id=str(data.get("i", "")),
+                symbol=symbol,
+                side=side,
+                type=_map_binance_order_type(data.get("o")),
+                quantity=float(data.get("q", 0) or 0),
+                price=float(data.get("p", 0) or 0) or None,
+                status=_map_binance_order_status(order_status),
+            )
+            await self._on_order_update(order)

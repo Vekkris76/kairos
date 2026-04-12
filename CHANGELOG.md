@@ -2,6 +2,29 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.2.2] — 2026-04-12 — *BinanceLive user-data WebSocket*
+
+Closes the last stub in the v0.2 live adapter: **real-time fills from Binance via the user-data stream**. Before this release, `BinanceLive._fetch_listen_key` and `BinanceLive._user_ws_session` raised `NotImplementedError` and adapters fell back to reconciliation polling. Now the live adapter is wire-complete.
+
+### Added
+
+- **`BinanceLive._fetch_listen_key()`** — `POST /api/v3/userDataStream` with the `X-MBX-APIKEY` header (prod: `api.binance.com`, testnet: `testnet.binance.vision`).
+- **`BinanceLive._user_ws_session()`** — connects `wss://.../ws/{listenKey}`, streams `executionReport` frames, parses each into a `Fill` (on `x=TRADE`) + `Order` status update. Ping interval 30s, timeout 10s.
+- **`BinanceLive._keepalive_listen_key()`** — background task that `PUT`s the listenKey every 30 min per Binance's spec. Failures are logged but don't kill the adapter — the reconnect loop rebuilds the key on the next session.
+- **`BinanceLive._close_listen_key()`** — polite `DELETE` on disconnect.
+- **Testnet URL switch** — `_rest_base()` / `_ws_base()` return the right host based on the `testnet=` constructor flag. `BinanceAdapter` (CCXT) now also calls `set_sandbox_mode(True)` when `testnet=True`.
+- **Binance → Kairos enum mappers** — `_map_binance_order_status` (NEW → ACCEPTED, FILLED → FILLED, etc.) and `_map_binance_order_type` (LIMIT_MAKER → LIMIT, STOP_LOSS → STOP_MARKET, etc.).
+
+### Tests
+
+**209 passing** (200 v0.2.1 + 9 new): executionReport → Fill; non-execution events ignored; NEW exec_type doesn't emit a fill; partial fills emit both Fill and Order update; SELL side routed correctly; prod/testnet URL switch; enum mappers.
+
+### Migration from 0.2.1
+
+No breaking changes. Existing callers see:
+- `BinanceLive(testnet=True, ...)` now reaches real Binance testnet endpoints instead of swallowing the NotImplementedError.
+- Fills flow through `set_fill_callback` as soon as the user-data WS connects — no more waiting on reconciliation polling.
+
 ## [0.2.1] — 2026-04-12 — *Strategies + adapter wiring*
 
 The minor release that makes the v0.2 live runtime *actually run* end-to-end. v0.2.0 shipped the foundation primitives; v0.2.1 wires them together so a strategy registered with the engine receives bars from a live adapter and updates the cache automatically.

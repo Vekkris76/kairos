@@ -29,13 +29,24 @@ TIMEFRAME_MAP = {
 class BinanceAdapter(ExchangeAdapter):
     """Live Binance Spot exchange adapter."""
 
-    def __init__(self, api_key: str, api_secret: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        testnet: bool = False,
+    ) -> None:
         self._exchange = ccxt.binance({
             "apiKey": api_key,
             "secret": api_secret,
             "options": {"defaultType": "spot"},
             "enableRateLimit": True,
         })
+        if testnet:
+            # ccxt's standard testnet switch — routes REST to
+            # testnet.binance.vision. Required for testnet trading.
+            self._exchange.set_sandbox_mode(True)
+        self._testnet = testnet
         self._bar_callbacks: dict[str, list[Callable]] = {}
         self._fill_callback: Callable | None = None
         self._order_callback: Callable | None = None

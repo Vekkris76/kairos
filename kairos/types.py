@@ -88,7 +88,15 @@ class Order:
 
 @dataclass
 class Fill:
-    """Order execution fill."""
+    """Order execution fill.
+
+    The ``explanation`` field is a v0.2 design hook for the v0.3 "why card"
+    feature (vision §6). v0.2 ships it as ``None``; v0.3 fills it with a
+    structured record (indicators at entry, regime detected, win
+    probability estimate, counterfactual). Strategies and actors that
+    want to surface a "why" can read this field today and get an empty
+    dict; tomorrow the same code lights up.
+    """
     order_id: str
     trade_id: str
     symbol: str
@@ -97,6 +105,10 @@ class Fill:
     quantity: float
     commission: float
     timestamp: int
+    # v0.2 design hook — see vision.md §6 (Why card)
+    explanation: dict | None = None
+    bracket_id: str | None = None
+    strategy_name: str | None = None
 
 
 @dataclass

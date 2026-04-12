@@ -1,348 +1,263 @@
-# Autopilot Engine — Architecture
+# Architecture
 
-## Design Principles
+How Kairos is structured. Read this before extending the runtime or writing a new adapter.
 
-1. **Simple over complex** — If it takes more than 10 lines to make a strategy, we failed
-2. **Python-first** — No Rust, no Cython. Pure Python. Anyone can contribute
-3. **Multi-strategy native** — Run N strategies simultaneously. Not an afterthought
-4. **Crypto-focused** — We do crypto spot extremely well. Not stocks, not forex, not derivatives
-5. **MIT licensed** — No restrictions. Fork it, sell it, do whatever
+## High level
 
-## System Overview
+Kairos has two engines for two use cases:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Autopilot Engine                      │
-│                                                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐             │
-│  │Strategy A│  │Strategy B│  │Strategy C│  ...         │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘             │
-│       │              │              │                   │
-│  ┌────▼──────────────▼──────────────▼────┐             │
-│  │           Strategy Runner              │             │
-│  │  (calls on_bar for each strategy)      │             │
-│  └────────────────┬──────────────────────┘             │
-│                   │                                     │
-│  ┌────────────────▼──────────────────────┐             │
-│  │           Event Bus                    │             │
-│  │  (bars, fills, positions, signals)     │             │
-│  └───┬────────┬───────────┬──────────────┘             │
-│      │        │           │                             │
-│  ┌───▼──┐ ┌──▼────┐ ┌───▼──────┐ ┌──────────┐        │
-│  │ Data │ │Orders │ │Positions │ │   Risk   │        │
-│  │ Feed │ │Manager│ │ Tracker  │ │Validator │        │
-│  └───┬──┘ └──┬────┘ └──────────┘ └──────────┘        │
-│      │       │                                         │
-│  ┌───▼───────▼─────────────────────┐                  │
-│  │      Exchange Adapter            │                  │
-│  │  (Binance / Paper / Custom)      │                  │
-│  └──────────────────────────────────┘                  │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  v0.1 PAPER / BACKTEST PATH                                    │
+│                                                                │
+│  Engine + Strategy + BacktestEngine + DataCatalog              │
+│  → simple, synchronous, in-memory                              │
+│  → for learning, prototyping, and offline simulation           │
+└────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────┐
+│  v0.2 LIVE PATH                                                │
+│                                                                │
+│  LiveEngine + Actor + MarketCache + BracketManager + Adapter   │
+│  → async event loop, multi-actor, atomic brackets, OCO         │
+│  → for production live trading                                 │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+Both share `kairos.types` (Bar, Order, Fill, Position, Instrument, OrderSide, etc.) so types flow between them.
 
-### 1. Engine (`autopilot/engine.py`)
-
-The main entry point. Creates all components, manages lifecycle.
-
-```python
-engine = Engine(exchange="binance", api_key="...", api_secret="...")
-engine.add(MyStrategy, symbol="BTCUSDC", timeframe="1h")
-engine.add(MyStrategy, symbol="ETHUSDC", timeframe="15m")
-engine.run()  # Blocks until stopped
-```
-
-Responsibilities:
-- Initialize exchange adapter, data feed, order manager
-- Register strategies and their subscriptions
-- Run the main event loop
-- Handle graceful shutdown (SIGTERM/SIGINT)
-
-### 2. Strategy (`autopilot/strategy.py`)
-
-Base class for all trading strategies. Users override `setup()` and `on_bar()`.
-
-```python
-class Strategy:
-    # Indicator helpers
-    def add_ema(period, name="") -> None
-    def add_rsi(period=14) -> None
-    def add_atr(period=14) -> None
-    def add_bollinger(period=20, std=2.0) -> None
-    def add_macd(fast=12, slow=26, signal=9) -> None
-
-    # Indicator accessors (auto-scaled, no quirks)
-    def ema(name) -> float
-    def fast_ema() -> float
-    def slow_ema() -> float
-    def rsi() -> float          # Always 0-100
-    def atr() -> float
-    def bollinger() -> dict     # {upper, middle, lower}
-    def macd() -> dict          # {macd, signal, histogram}
-
-    # Order methods (with built-in validation)
-    def buy(pct) -> bool                    # Market buy X% of balance
-    def sell_all() -> bool                  # Market sell entire position
-    def buy_limit(price, pct) -> str        # Limit buy, returns order_id
-    def sell_limit(price, qty) -> str       # Limit sell
-    def buy_bracket(pct, sl_atr, tp_atr) -> bool  # Entry + SL + TP
-    def cancel(order_id) -> bool
-
-    # Portfolio
-    def free_balance(currency="USDC") -> float
-    def has_position() -> bool
-    def position_qty() -> float
-    def position_pnl() -> float
-    def position_pnl_pct() -> float
-
-    # Lifecycle (override these)
-    def setup(self) -> None       # Declare indicators
-    def on_bar(self, bar) -> None # Called every bar
-    def on_fill(self, fill) -> None  # Called on order fill
-    def on_stop(self) -> None     # Cleanup
-```
-
-### 3. Exchange Adapter (`autopilot/exchanges/`)
-
-Abstraction layer over exchange APIs. Interface:
-
-```python
-class ExchangeAdapter:
-    async def connect() -> None
-    async def disconnect() -> None
-
-    # Market data
-    async def subscribe_bars(symbol, timeframe) -> None
-    async def get_historical_bars(symbol, timeframe, start, end) -> list[Bar]
-
-    # Orders
-    async def submit_order(order: Order) -> OrderResult
-    async def cancel_order(order_id: str) -> bool
-    async def get_open_orders() -> list[Order]
-
-    # Account
-    async def get_balances() -> dict[str, Balance]
-    async def get_positions() -> list[Position]
-
-    # Instrument info
-    async def get_instrument(symbol) -> Instrument
-```
-
-Implementations:
-- `BinanceAdapter` — Real Binance Spot (CCXT + WebSocket)
-- `PaperAdapter` — Simulated exchange for testing
-- Custom adapters via the interface
-
-### 4. Order Manager (`autopilot/orders/manager.py`)
-
-Handles order lifecycle: created → submitted → accepted → filled/cancelled.
-
-- Tracks all orders by ID
-- Manages bracket orders (OCO: SL cancels when TP fills, vice versa)
-- Handles partial fills
-- Detects duplicate fills (by trade_id)
-- Emits events: OrderSubmitted, OrderFilled, OrderCancelled, OrderRejected
-
-### 5. Data Feed (`autopilot/data/feed.py`)
-
-Manages bar subscriptions and delivers data to strategies.
-
-- Subscribes to exchange WebSocket streams
-- Aggregates ticks into OHLCV bars
-- Maintains a rolling cache of recent bars per symbol/timeframe
-- Delivers bars to all subscribed strategies simultaneously
-
-### 6. Position Tracker (`autopilot/orders/position.py`)
-
-Tracks open positions per instrument (netting mode).
-
-- Calculates average entry price across multiple fills
-- Calculates realized PnL on partial/full closes
-- Calculates unrealized PnL from last market price
-- Emits events: PositionOpened, PositionChanged, PositionClosed
-
-### 7. Risk Validator (`autopilot/risk/validator.py`)
-
-Pre-trade validation before every order submission:
-
-- Free balance sufficient
-- Quantity within instrument min/max
-- Notional above minimum
-- Order rate within throttle limits
-- Trading state allows new orders (not HALTED)
-
-### 8. Indicators (`autopilot/indicators/`)
-
-Pure Python implementations. Each indicator:
-- Has `update(value)` method
-- Has `value` property (current value)
-- Has `initialized` property (enough data received)
-- Is stateful (maintains internal buffers)
-
-### 9. Backtest Engine (`autopilot/backtest/`)
-
-Replays historical bars through the same engine:
-
-```python
-from kairos import BacktestEngine
-
-bt = BacktestEngine(initial_balance=1000)
-bt.load_data("BTCUSDC", "1h", start="2025-01-01", end="2025-12-31")
-bt.add(MyStrategy, symbol="BTCUSDC", timeframe="1h")
-results = bt.run()
-
-print(results.total_pnl)
-print(results.win_rate)
-print(results.max_drawdown)
-results.plot()  # Equity curve
-```
-
-## Data Types
-
-### Bar
-```python
-@dataclass
-class Bar:
-    symbol: str
-    timeframe: str
-    timestamp: int      # milliseconds
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-```
-
-### Order
-```python
-@dataclass
-class Order:
-    id: str
-    symbol: str
-    side: OrderSide     # BUY / SELL
-    type: OrderType     # MARKET / LIMIT / STOP_MARKET / STOP_LIMIT
-    quantity: float
-    price: float | None
-    stop_price: float | None
-    time_in_force: str  # GTC / IOC / FOK
-    status: OrderStatus # PENDING / SUBMITTED / FILLED / CANCELLED
-    post_only: bool
-    reduce_only: bool
-```
-
-### Fill
-```python
-@dataclass
-class Fill:
-    order_id: str
-    trade_id: str
-    symbol: str
-    side: OrderSide
-    price: float
-    quantity: float
-    commission: float
-    timestamp: int
-```
-
-### Position
-```python
-@dataclass
-class Position:
-    symbol: str
-    side: PositionSide   # LONG / FLAT
-    quantity: float
-    avg_entry: float
-    unrealized_pnl: float
-    realized_pnl: float
-```
-
-## Event System
-
-Components communicate via an async event bus:
+## v0.2 live runtime layout
 
 ```
-BarReceived → Strategy.on_bar() → engine.buy()
-    → RiskValidator.check() → ExchangeAdapter.submit_order()
-        → OrderSubmitted → OrderFilled → PositionTracker.update()
-            → Strategy.on_fill()
+                           ┌───────────────────┐
+                           │  Strategy code    │
+                           │  (your bot)       │
+                           └────────┬──────────┘
+                                    │ inherits
+                                    │
+                           ┌────────▼──────────┐
+                           │     Strategy      │
+                           │  (kairos)         │
+                           └────────┬──────────┘
+                                    │
+                                    │ registered with
+                                    │
+┌──────────────────────────────────▼────────────────────────────────┐
+│                          LiveEngine                                │
+│                                                                    │
+│  ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌─────────────────┐   │
+│  │ EventBus │  │ Scheduler  │  │  Clock   │  │  MarketCache    │   │
+│  │  (queues │  │  (timers)  │  │ (system  │  │   (bars/ticks/  │   │
+│  │   per    │  │            │  │   or     │  │  orders/posn)   │   │
+│  │  kind)   │  │            │  │   test)  │  │                 │   │
+│  └────┬─────┘  └────┬───────┘  └──────────┘  └────────┬────────┘   │
+│       │             │                                  │            │
+│       │             │  fan-out                         │  reads     │
+│       │             ▼                                  │            │
+│   ┌───┴───────────────────────────────────────────────▼──────┐    │
+│   │                  Actors (Protection, Intelligence,        │    │
+│   │              Learning, Notification, ParameterTuner)      │    │
+│   │                                                            │    │
+│   │   - on_bar / on_tick / on_order_filled / on_signal /      │    │
+│   │     on_adapter_disconnected / on_adapter_reconnected      │    │
+│   │   - publish_signal — emits to other actors via the bus    │    │
+│   │   - set_timer — schedules periodic callbacks              │    │
+│   └────────────────────────────────────────────────────────────┘    │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │                   BracketManager + Reconciler                │  │
+│  │                                                              │  │
+│  │   submits orders via the adapter; ensures atomicity (entry+  │  │
+│  │   SL+TP all-or-none) and OCO (TP fill cancels SL, etc.)      │  │
+│  └──────────────────────────────┬───────────────────────────────┘  │
+└───────────────────────────────┼─────────────────────────────────┘
+                                │
+                                │ submit / cancel orders
+                                ▼
+                       ┌────────────────────┐
+                       │  LiveAdapter       │       (Protocol)
+                       │                    │
+                       │  - BinanceLive     │       (concrete v0.2)
+                       │  - KrakenLive ...  │       (future)
+                       └─────────┬──────────┘
+                                 │
+                                 │ REST + WebSocket
+                                 ▼
+                          ┌────────────┐
+                          │  Exchange  │
+                          │ (Binance)  │
+                          └────────────┘
 ```
 
-Events:
-- `BarReceived(bar)` — new bar from data feed
-- `OrderSubmitted(order)` — order sent to exchange
-- `OrderFilled(fill)` — order executed
-- `OrderCancelled(order_id)` — order cancelled
-- `OrderRejected(order_id, reason)` — order rejected
-- `PositionOpened(position)` — new position
-- `PositionClosed(position, pnl)` — position closed
-- `RiskAlert(state, message)` — risk state change
+## Module map
 
-## Configuration
+| Package | Purpose |
+|---------|---------|
+| `kairos.runtime` | `Clock`, `Scheduler`, `EventBus`, `LiveEngine`, `ParameterProvider` |
+| `kairos.actors` | `Actor` ABC + `ActorConfig` |
+| `kairos.cache` | `MarketCache` + `Account` |
+| `kairos.execution` | `BracketManager`, `Reconciler`, `ExecutionPolicy` + `StaticPolicy` |
+| `kairos.adapters` | `LiveAdapter` Protocol + `BinanceLive` |
+| `kairos.parity` | Cross-engine fill matcher (already in v0.1) |
+| `kairos.indicators` | 12 indicators (v0.1) |
+| `kairos.orders` | Basic `OrderManager` + `PositionTracker` (v0.1) |
+| `kairos.exchanges` | v0.1 `BinanceAdapter` + `BinanceWebSocket` (used by `BinanceLive`) |
+| `kairos.backtest` | `BacktestEngine` + `DataCatalog` (v0.1) |
+| `kairos.marketplace` | Strategy registry + builder (v0.1) |
+| `kairos.types` | `Bar`, `Order`, `Fill`, `Position`, `Instrument`, enums |
 
-Minimal config via constructor arguments + optional YAML:
-
-```yaml
-# autopilot.yaml (optional)
-exchange: binance
-base_currency: USDC
-risk:
-  max_drawdown_pct: 15
-  max_daily_loss_pct: 3
-  max_orders_per_minute: 30
-logging:
-  level: INFO
-  file: autopilot.log
-```
-
-## Directory Structure
+## Event flow (live)
 
 ```
-autopilot/
-├── __init__.py          # Public API: Engine, Strategy, BacktestEngine
-├── engine.py            # Main engine + event loop
-├── strategy.py          # Strategy base class
-├── config.py            # Configuration loading
-├── events.py            # Event types + bus
-├── types.py             # Bar, Order, Fill, Position dataclasses
-├── exchanges/
-│   ├── __init__.py
-│   ├── base.py          # ExchangeAdapter interface
-│   ├── binance.py       # Binance Spot (CCXT + WS)
-│   └── paper.py         # Paper trading simulator
-├── orders/
-│   ├── __init__.py
-│   ├── manager.py       # Order lifecycle management
-│   └── position.py      # Position tracking + PnL
-├── data/
-│   ├── __init__.py
-│   ├── feed.py          # Bar subscriptions + delivery
-│   ├── cache.py         # In-memory bar cache
-│   └── catalog.py       # Parquet data storage
-├── indicators/
-│   ├── __init__.py
-│   ├── ema.py
-│   ├── rsi.py
-│   ├── atr.py
-│   ├── bollinger.py
-│   ├── macd.py
-│   ├── sma.py
-│   ├── stochastic.py
-│   ├── vwap.py
-│   ├── obv.py
-│   ├── donchian.py
-│   ├── roc.py
-│   ├── adx.py
-│   ├── hma.py
-│   ├── regression.py
-│   └── aroon.py
-├── risk/
-│   ├── __init__.py
-│   ├── validator.py     # Pre-trade checks
-│   └── protection.py    # Drawdown/daily loss states
-└── backtest/
-    ├── __init__.py
-    ├── engine.py        # Backtest runner
-    ├── simulator.py     # Simulated fill engine
-    └── results.py       # Performance metrics + plots
+Adapter (Binance WS frame arrives)
+    │
+    │  parse → Bar / Tick / Fill / OrderUpdate
+    │
+    ▼
+Adapter callback (set by engine at register time)
+    │
+    │  await engine.event_bus.publish("bar", bar)
+    │
+    ▼
+EventBus
+    │
+    │  fan out to subscribers of "bar"
+    │
+    ├──► Actor A's queue
+    ├──► Actor B's queue
+    └──► Strategy queue
+              │
+              │  consumer task awaits queue.get(), calls hook
+              │
+              ▼
+       Actor.on_bar(bar)  /  Strategy.on_bar(bar)
+              │
+              │  may publish signals or submit orders
+              │
+              ▼
+       (signals) → EventBus → other actors
+       (orders)  → BracketManager → adapter.submit_order → Exchange
 ```
+
+Single-process. Single asyncio loop. No threads. No locks (consumers are single-tasked).
+
+## Lifecycle
+
+```
+LiveEngine.run()
+  │
+  ├─ for each actor: actor.on_start()
+  │
+  ├─ spawn one consumer task per actor (drains its queue)
+  ├─ spawn the scheduler task (fires timers)
+  │
+  ├─ block until shutdown_event set (SIGTERM / SIGINT / .stop())
+  │
+  └─ shutdown:
+       ├─ scheduler.stop()
+       ├─ cancel consumer tasks (drain in-flight items)
+       ├─ for each actor (LIFO): on_stop() with 5 s timeout
+       ├─ adapter.disconnect()
+       └─ event_bus.close()
+       exit 0
+```
+
+## Exception isolation
+
+If `Actor.on_bar()` raises:
+
+1. Engine catches the exception in `_route()`
+2. Logs full traceback at `ERROR`
+3. Sets `actor.healthy = False`
+4. Publishes `signal:actor_degraded` with `{actor, hook, error}`
+5. Skips further events to that actor (it's done — no retries)
+6. **Engine survives**; other actors keep receiving events
+
+This is the foundational contract: one bad actor never takes down the whole process. The SaaS layer can listen for `signal:actor_degraded` and alert the operator.
+
+## Bracket order state machine
+
+```
+        submit_bracket()
+              │
+              ▼
+         ┌─────────┐  entry submission fails
+         │ pending │ ────────────────────► raise (no orders)
+         └────┬────┘
+              │ entry succeeds
+              ▼
+         ┌─────────┐  SL submission fails
+         │ pending │ ────────────────────► reverse-close entry,
+         │  (entry │                       state = "failed",
+         │ filled, │                       BracketSubmissionError
+         │ no exit)│
+         └────┬────┘
+              │ SL ok
+              ▼
+         ┌─────────┐  TP submission fails
+         │ pending │ ────────────────────► cancel SL,
+         │  (entry,│                       reverse-close entry,
+         │ SL armed│                       state = "failed",
+         │  no TP) │                       BracketSubmissionError
+         └────┬────┘
+              │ TP ok
+              ▼
+         ┌─────────┐  TP fills            ┌───────────┐
+         │  armed  │ ──────────────────►  │ completed │
+         │ (entry, │                      │ exit_type │
+         │ SL & TP │  SL fills            │ = "tp"|   │
+         │  ready) │ ──────────────────►  │   "sl"    │
+         └─────────┘                      └───────────┘
+              │                                ▲
+              │ cancel_bracket()               │
+              └────────────────────────────────┘
+                       exit_type = "manual"
+```
+
+When TP fills, the OCO sibling (SL) is cancelled within 2 s. Same for SL → TP.
+
+## Curation principle
+
+Per the [vision](vision.md), Kairos curates the best primitives the open-source ecosystem provides and adds a single proprietary layer on top: **adaptivity**.
+
+What we adopt (with attribution in [`CREDITS.md`](../CREDITS.md)):
+
+- **`ccxt`** for non-Binance exchange transport (200+ venues handled by one library)
+- **`pandas-ta`** for indicator math reference
+- **`hummingbot`** patterns for WebSocket reconnect + rate limiting (we wrote our own; pattern attribution only)
+- **`NautilusTrader`** for order state machine design (study only — clean-room implementation; LGPL means we can't vendor)
+- **`Jesse` / `Freqtrade`** for strategy lifecycle conventions
+
+What is **only Kairos**:
+
+- The adaptive runtime layer (`ParameterProvider`, `ExecutionPolicy` design hooks for v0.3+)
+- The IngestionActor (the meta-improvement engine — coming in v0.4)
+- The `parity` module (cross-engine fill matcher with verdict logic)
+- The `Why card` explanation field on `Fill` (design hook in v0.2, populated v0.3)
+
+## Design hooks for v0.3+
+
+Three extension points are wired in v0.2 but no-op until v0.3+:
+
+| Hook | Where | What v0.3+ does |
+|------|-------|------------------|
+| `Fill.explanation: dict \| None` | `kairos.types` | v0.3 fills it with indicators / regime / win probability for the **why card** UI feature |
+| `ParameterProvider` | `kairos.runtime.parameters` | v0.3 plugs in `BayesianProvider` for **continual tuning** (Bayesian posterior per parameter, updated per trade) |
+| `ExecutionPolicy` | `kairos.execution.policy` | v0.3 plugs in `AdaptivePolicy` for **adaptive execution** (learn optimal order type per regime × spread) |
+
+These let v0.3 work add value without changing the v0.2 API. Strategies and actors compiled against v0.2 keep running on v0.3+ with no changes.
+
+## Testing
+
+- 181 tests, all pure Python, run in <1 s
+- Run with `pytest`
+- `TestClock` makes the runtime fully deterministic in tests (no `asyncio.sleep`)
+- Adapter integration tests against Binance testnet require API keys; not in CI by default
+
+## What's not yet here
+
+- v0.2.1: full Binance user-data WebSocket implementation (currently the listenKey + WS session methods are documented `NotImplementedError` hooks)
+- v0.3: adaptive execution + continual tuning + why-card population
+- v0.4: IngestionActor + counterfactual shadow
+
+See [vision.md](vision.md) for the full roadmap.

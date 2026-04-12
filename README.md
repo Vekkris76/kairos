@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/Vekkris76/kairos/actions/workflows/ci.yml/badge.svg)](https://github.com/Vekkris76/kairos/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![PyPI](https://img.shields.io/badge/pypi-kairos--engine-blue.svg)](https://pypi.org/project/kairos-engine/)
+[![PyPI](https://img.shields.io/pypi/v/kairos-engine.svg)](https://pypi.org/project/kairos-engine/)
+[![Tests](https://img.shields.io/badge/tests-181%20passing-brightgreen.svg)](https://github.com/Vekkris76/kairos/tree/main/tests)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 > **Κairós** (καιρός) — ancient Greek for *"the opportune moment"*.
@@ -12,9 +13,9 @@
 
 ## Status
 
-- **v0.1.x** (current): backtesting + paper trading + Binance Spot adapter + 12 indicators + order manager + risk validator + strategy marketplace + analytics + `parity` module
-- **v0.2.x** (in progress): live runtime + actors + market cache + execution extensions + Binance live WS — production-ready engine
-- **v0.3+ → v1.0**: the differentiators — adaptive execution, behavioral risk, continual tuning, IngestionActor, why-cards, counterfactual shadow, federated learning, signed track records
+- **v0.1.x** (shipped): backtesting + paper trading + Binance Spot adapter + 12 indicators + order manager + risk validator + strategy marketplace + analytics + `parity` module
+- **v0.2.x** (shipped): live runtime + actors + market cache + atomic bracket orders with OCO + reconciliation + Binance live adapter + design hooks for adaptive features
+- **v0.3+ → v1.0** (roadmap): the differentiators — adaptive execution, behavioral risk, continual tuning, IngestionActor, why-cards, counterfactual shadow, federated learning, signed track records
 
 See [`docs/vision.md`](docs/vision.md) for the full product vision.
 

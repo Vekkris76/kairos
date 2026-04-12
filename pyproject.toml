@@ -1,15 +1,16 @@
 [project]
-name = "autopilot-engine"
-version = "0.1.0"
-description = "Simple, powerful, Python-first crypto trading framework"
+name = "kairos-engine"
+version = "0.2.0a0"
+description = "Kairos — adaptive crypto trading engine. Curates the best of the open-source ecosystem and adds a learning layer on top."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "MIT" }   # under review for v1.0; v0.1.x and v0.2.x stay MIT
 requires-python = ">=3.11"
-authors = [{ name = "Trading Autopilot" }]
-keywords = ["trading", "crypto", "bitcoin", "binance", "bot", "algorithmic"]
+authors = [{ name = "Kairos / Trading Autopilot", email = "noreply@trading-autopilot.dev" }]
+keywords = ["trading", "crypto", "bitcoin", "binance", "bot", "algorithmic", "adaptive", "kairos"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -18,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    # Exchange connectivity
+    # Exchange connectivity (curated: 200+ exchanges, MIT)
     "ccxt>=4.0.0",
     "websockets>=14.0",
 
@@ -44,13 +45,17 @@ plot = [
     "matplotlib>=3.8.0",
 ]
 all = [
-    "autopilot-engine[data,plot]",
+    "kairos-engine[data,plot]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/Vekkris76/autopilot-engine"
-Documentation = "https://github.com/Vekkris76/autopilot-engine/tree/main/docs"
-Repository = "https://github.com/Vekkris76/autopilot-engine"
+Homepage = "https://github.com/Vekkris76/kairos"
+Documentation = "https://github.com/Vekkris76/kairos/tree/main/docs"
+Repository = "https://github.com/Vekkris76/kairos"
+Changelog = "https://github.com/Vekkris76/kairos/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+packages = { find = { include = ["kairos*"], exclude = ["tests*", "examples*"] } }
 
 [tool.ruff]
 line-length = 100

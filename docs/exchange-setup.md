@@ -16,7 +16,7 @@
 ### 2. Configure the Engine
 
 ```python
-from autopilot import Engine
+from kairos import Engine
 
 engine = Engine(
     exchange="binance",

@@ -4,7 +4,7 @@ Buys when RSI is oversold (<30). Adds more if price drops further.
 Sells when RSI is overbought (>70) or take-profit reached.
 """
 
-from autopilot import Engine, Strategy
+from kairos import Engine, Strategy
 
 
 class DCABot(Strategy):

@@ -1,7 +1,7 @@
 """Tests for position tracking."""
 
-from autopilot.orders.position import PositionTracker
-from autopilot.types import Fill, OrderSide
+from kairos.orders.position import PositionTracker
+from kairos.types import Fill, OrderSide
 
 
 def _fill(symbol: str, side: OrderSide, price: float, qty: float, commission: float = 0) -> Fill:

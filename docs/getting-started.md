@@ -19,7 +19,7 @@ pip install -e .
 Create a file called `my_bot.py`:
 
 ```python
-from autopilot import Engine, Strategy
+from kairos import Engine, Strategy
 
 class SimpleBot(Strategy):
     def setup(self):
@@ -82,8 +82,8 @@ engine.run()  # All three run at the same time!
 Test your strategy on historical data before risking real money:
 
 ```python
-from autopilot import BacktestEngine
-from autopilot.types import Bar
+from kairos import BacktestEngine
+from kairos.types import Bar
 
 # Load your data (from CSV, API, or any source)
 bars = [

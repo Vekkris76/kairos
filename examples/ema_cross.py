@@ -7,7 +7,7 @@ Usage:
     python examples/ema_cross.py
 """
 
-from autopilot import Engine, Strategy
+from kairos import Engine, Strategy
 
 
 class EMACross(Strategy):

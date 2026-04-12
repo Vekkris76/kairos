@@ -4,7 +4,7 @@ Uses EMA trend + RSI momentum + ATR for bracket sizing.
 Enters on confluence, exits with 1:2 risk-reward bracket.
 """
 
-from autopilot import Engine, Strategy
+from kairos import Engine, Strategy
 
 
 class ScalpingBot(Strategy):

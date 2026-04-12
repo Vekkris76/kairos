@@ -6,7 +6,7 @@ Pure-Python tests, no I/O, run in milliseconds.
 
 from __future__ import annotations
 
-from autopilot.parity import (
+from kairos.parity import (
     QUANTITY_TOLERANCE_PCT,
     FillRecord,
     MatchReport,

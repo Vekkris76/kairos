@@ -5,7 +5,7 @@ When a buy fills, places a sell one level above.
 Profits from the spread between levels.
 """
 
-from autopilot import Engine, Strategy
+from kairos import Engine, Strategy
 
 
 class GridBot(Strategy):

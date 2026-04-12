@@ -5,7 +5,7 @@
 Every strategy extends `Strategy` and overrides two methods:
 
 ```python
-from autopilot import Strategy
+from kairos import Strategy
 
 class MyStrategy(Strategy):
     def setup(self):

@@ -176,8 +176,8 @@ Access via `self._indicators["adx_14"]`:
 Create a file in `autopilot/indicators/`:
 
 ```python
-from autopilot.indicators.base import Indicator
-from autopilot.types import Bar
+from kairos.indicators.base import Indicator
+from kairos.types import Bar
 
 class MyIndicator(Indicator):
     def __init__(self, period: int = 14) -> None:

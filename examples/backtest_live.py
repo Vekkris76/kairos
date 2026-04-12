@@ -11,8 +11,8 @@ import json
 import time
 from urllib.request import urlopen
 
-from autopilot import BacktestEngine, Strategy
-from autopilot.types import Bar
+from kairos import BacktestEngine, Strategy
+from kairos.types import Bar
 
 
 class EMACross(Strategy):

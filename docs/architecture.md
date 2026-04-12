@@ -185,7 +185,7 @@ Pure Python implementations. Each indicator:
 Replays historical bars through the same engine:
 
 ```python
-from autopilot import BacktestEngine
+from kairos import BacktestEngine
 
 bt = BacktestEngine(initial_balance=1000)
 bt.load_data("BTCUSDC", "1h", start="2025-01-01", end="2025-12-31")

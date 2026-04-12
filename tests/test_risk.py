@@ -1,7 +1,7 @@
 """Tests for risk validator."""
 
-from autopilot.risk.validator import RiskValidator
-from autopilot.types import Balance, Instrument, OrderSide, TradingState
+from kairos.risk.validator import RiskValidator
+from kairos.types import Balance, Instrument, OrderSide, TradingState
 
 
 def _instrument() -> Instrument:

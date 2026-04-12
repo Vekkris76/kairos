@@ -11,8 +11,8 @@ Never trade a strategy with real money before testing it on historical data. Bac
 ## Quick Start
 
 ```python
-from autopilot import BacktestEngine, Strategy
-from autopilot.types import Bar
+from kairos import BacktestEngine, Strategy
+from kairos.types import Bar
 
 class MyBot(Strategy):
     def setup(self):
@@ -46,7 +46,7 @@ print(results)
 ```python
 import json
 from urllib.request import urlopen
-from autopilot.types import Bar
+from kairos.types import Bar
 
 def fetch_binance_bars(symbol, interval, days=30):
     import time
@@ -86,7 +86,7 @@ print(f"Loaded {len(bars)} bars")
 
 ```python
 import csv
-from autopilot.types import Bar
+from kairos.types import Bar
 
 def load_csv(filename, symbol, timeframe):
     bars = []

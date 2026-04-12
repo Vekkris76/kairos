@@ -1,12 +1,12 @@
 """Tests for all indicators."""
 
-from autopilot.types import Bar
-from autopilot.indicators.ema import EMA
-from autopilot.indicators.sma import SMA
-from autopilot.indicators.rsi import RSI
-from autopilot.indicators.atr import ATR
-from autopilot.indicators.bollinger import BollingerBands
-from autopilot.indicators.macd import MACD
+from kairos.types import Bar
+from kairos.indicators.ema import EMA
+from kairos.indicators.sma import SMA
+from kairos.indicators.rsi import RSI
+from kairos.indicators.atr import ATR
+from kairos.indicators.bollinger import BollingerBands
+from kairos.indicators.macd import MACD
 
 
 def _bar(close: float, high: float = 0, low: float = 0, volume: float = 100) -> Bar:

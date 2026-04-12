@@ -1,8 +1,8 @@
 """Tests for paper exchange adapter."""
 
 import pytest
-from autopilot.exchanges.paper import PaperAdapter
-from autopilot.types import Bar, OrderSide, OrderStatus, OrderType
+from kairos.exchanges.paper import PaperAdapter
+from kairos.types import Bar, OrderSide, OrderStatus, OrderType
 
 
 @pytest.fixture

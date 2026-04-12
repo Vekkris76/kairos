@@ -11,3 +11,4 @@ build/
 .DS_Store
 .ruff_cache/
 .pytest_cache/
+.venv-test/

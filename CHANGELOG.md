@@ -2,6 +2,74 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.2.1] — 2026-04-12 — *Strategies + adapter wiring*
+
+The minor release that makes the v0.2 live runtime *actually run* end-to-end. v0.2.0 shipped the foundation primitives; v0.2.1 wires them together so a strategy registered with the engine receives bars from a live adapter and updates the cache automatically.
+
+### Added
+
+- **`LiveStrategy`** (in `kairos.strategies.live`) — Actor-shaped strategy base with indicator declaration helpers (`add_rsi`, `add_ema`, `add_atr`), cache + state helpers (`free_balance`, `has_position`, `last_close`), and order shortcuts (`buy_bracket_pct`). Promoted from the V3StrategyActor pattern that emerged in Trading Autopilot's v3 work.
+  - Indicators update automatically on every bar
+  - `on_bar_ready(bar)` only fires after all indicators are warmed up (uses `Indicator.initialized` — `_count >= period`)
+  - Filters incoming bars to its own `symbol` so multi-symbol engines don't cross-feed
+  - Strategy authors set `self.symbol` and `self.timeframe` before passing to `engine.add_strategy()`
+
+- **`LiveEngine.register_adapter(adapter)`** — wires adapter callbacks (bars, ticks, fills, order updates, disconnect, reconnect) to the engine's EventBus and MarketCache. The engine connects adapters on `.run()`, subscribes them to every `(symbol, timeframe)` declared by registered strategies, and disconnects them on `.stop()`.
+
+- **Engine ↔ MarketCache binding**:
+  - `LiveEngine.cache` is constructed by default (or accepts one via the `cache=` constructor arg)
+  - At `add_actor` / `add_strategy` registration, the engine sets `actor.cache = self.cache` so actors and strategies have direct read access
+  - Bars / ticks / fills / order updates from any registered adapter automatically populate the cache before being published on the bus
+
+- **`LiveEngine.add_strategy(strategy)`** — finally functional. Sugar over `add_actor` with default events `{"bar", "order_filled"}`. Records the strategy's `(symbol, timeframe)` for adapter subscription on connect. De-duplicates so two strategies on the same stream produce one subscription.
+
+### Changed
+
+- `LiveEngine.run()` now: connects adapters → subscribes to streams → invokes `on_start` → spawns consumer tasks → blocks on shutdown. Disconnect-on-shutdown wired.
+
+### Tests
+
+**195 passing** (181 v0.2.0 + 14 new):
+
+- 7 LiveStrategy tests: indicator warmup gating, symbol filtering, accessors, cache-binding, no-bracket-manager, subscription tracking, dedup
+- 7 LiveEngine integration tests: adapter callbacks → cache → bus, fill flow, tick flow, disconnect/reconnect propagation, multi-adapter, registration safety
+
+### Migration from 0.2.0
+
+No breaking changes. v0.2.0 code keeps working unchanged. New strategies should subclass `LiveStrategy`:
+
+```python
+from kairos import LiveEngine, LiveStrategy
+from kairos.actors import ActorConfig
+
+class MyStrategy(LiveStrategy):
+    def __init__(self, config):
+        super().__init__(config)
+        self.add_ema(8, "fast")
+        self.add_ema(21, "slow")
+
+    def on_bar_ready(self, bar):
+        if self.fast_ema() > self.slow_ema() and self.free_balance() > 100:
+            import asyncio
+            asyncio.create_task(self.buy_bracket_pct(15.0, atr_multiplier=2.0))
+
+strategy = MyStrategy(ActorConfig())
+strategy.symbol = "BTCUSDC"
+strategy.timeframe = "15m"
+
+engine = LiveEngine()
+engine.register_adapter(BinanceLive(api_key, api_secret))
+engine.add_strategy(strategy)
+await engine.run()
+```
+
+### What's still NOT in 0.2.1
+
+- BinanceLive's user-data WebSocket implementation (the listenKey + WS session methods are documented `NotImplementedError` hooks). Until that lands in 0.2.2, fills arrive only via reconciliation polling.
+- Adaptive features (§1-10 from vision) — still v0.3+
+
+---
+
 ## [0.2.0] — 2026-04-12 — *Live runtime is here*
 
 The first **production-ready** Kairos release. Ships the live trading runtime that lets you run strategies against a real exchange (or a mock for tests) with proper actor orchestration, atomic bracket orders, OCO semantics, and reconciliation.

@@ -1,25 +1,26 @@
 """LiveEngine — orchestrates the live trading lifecycle.
 
-This is the v0.2 runtime. It owns the event loop, the scheduler, the
-event bus, the registered actors and strategies, and (in v0.2 final) the
-market cache + adapters. This skeleton ships in v0.2.0a1 and is fleshed
-out in subsequent v0.2 alphas.
+This is the v0.2 runtime, fleshed out in v0.2.1 to actually wire
+strategies + adapters + cache. v0.2.0 shipped the skeleton; v0.2.1
+makes it functional end-to-end.
 
-What this module DOES today:
-- Scaffolds LiveEngine class with add_actor / add_strategy / run / stop
-- Wires actors to the EventBus and Scheduler
-- Routes incoming events to the correct actor hooks
-- Catches exceptions per-actor (engine survives, actor marked degraded)
-- Provides graceful shutdown via SIGTERM/SIGINT or .stop()
+What this module does (v0.2.1):
+- Owns the EventBus, Scheduler, Clock, MarketCache.
+- Adapter registration: callbacks wired so adapter events flow into
+  the cache + bus automatically.
+- ``add_actor`` / ``add_strategy``: registers components and binds
+  ``self.cache`` so they can read market state.
+- Lifecycle: on_start invocation, consumer tasks per actor, scheduler
+  loop, graceful shutdown (SIGTERM / SIGINT, 10s drain, 5s per-actor
+  on_stop).
+- Reconciliation triggered automatically on adapter_reconnected.
+- Exception isolation: an actor raising marks itself degraded and
+  publishes ``signal:actor_degraded``; engine continues.
 
-What this module does NOT do yet (coming in next alphas):
-- Adapter registration (depends on Phase 1 §6 — Binance live)
-- MarketCache integration (depends on Phase 1 §4)
-- Bracket order OCO (depends on Phase 1 §5)
-- Reconciliation (depends on Phase 1 §5.3)
-
-The shape is locked, however: future PRs add functionality without
-breaking the signature contract here.
+What this module does NOT do yet:
+- BracketManager + Reconciler are constructed by callers and passed
+  through (engine doesn't own them — composition over inheritance).
+- Indicator warmup is the strategy's responsibility (see LiveStrategy).
 """
 
 from __future__ import annotations
@@ -28,14 +29,23 @@ import asyncio
 import logging
 import signal
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kairos.actors.base import Actor
+from kairos.cache.market_cache import MarketCache
 from kairos.runtime.clock import Clock, SystemClock
 from kairos.runtime.event_bus import EventBus, _validate_kind
 from kairos.runtime.scheduler import Scheduler
 
+if TYPE_CHECKING:
+    from kairos.adapters.base import LiveAdapter
+
 logger = logging.getLogger("kairos.live_engine")
+
+# Strategy event subscription default — strategies care about bars +
+# their own fills (so they can react / reset state). Override via
+# ``add_strategy(strategy, events=...)`` for advanced use cases.
+_STRATEGY_DEFAULT_EVENTS = frozenset({"bar", "order_filled"})
 
 
 class LiveEngine:
@@ -44,24 +54,48 @@ class LiveEngine:
     Typical usage::
 
         engine = LiveEngine()
+        engine.register_adapter(BinanceLive(api_key, api_secret))
         engine.add_actor(ProtectionActor(cfg), events={"bar", "order_filled"})
-        engine.register_adapter(BinanceLiveAdapter(...))   # Phase 1 §6
+        engine.add_strategy(MyStrategy(cfg))
         await engine.run()
     """
 
-    def __init__(self, *, clock: Clock | None = None) -> None:
+    def __init__(self, *, clock: Clock | None = None, cache: MarketCache | None = None) -> None:
         self.clock: Clock = clock or SystemClock()
         self.event_bus: EventBus = EventBus()
         self.scheduler: Scheduler = Scheduler(clock=self.clock)
+        self.cache: MarketCache = cache or MarketCache()
 
         self._actors: list[Actor] = []
-        self._strategies: list[Any] = []  # Strategy will be wired in next phase
+        self._adapters: list["LiveAdapter"] = []
+        self._strategy_subscriptions: list[tuple[str, str]] = []  # (symbol, timeframe)
         self._consumer_tasks: list[asyncio.Task[None]] = []
         self._scheduler_task: asyncio.Task[None] | None = None
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._running: bool = False
 
     # ── Registration ────────────────────────────────────────────────
+
+    def register_adapter(self, adapter: "LiveAdapter") -> None:
+        """Register a venue adapter. Engine wires its callbacks to the
+        EventBus + MarketCache. Adapter is connected on ``.run()``,
+        disconnected on ``.stop()``.
+
+        Multiple adapters allowed (one per venue). Each gets its own
+        callback wiring; events flow into the same shared bus.
+        """
+        if self._running:
+            raise RuntimeError("Cannot register_adapter while engine is running")
+
+        adapter.set_bar_callback(self._on_bar_from_adapter)
+        adapter.set_tick_callback(self._on_tick_from_adapter)
+        adapter.set_fill_callback(self._on_fill_from_adapter)
+        adapter.set_order_update_callback(self._on_order_update_from_adapter)
+        adapter.set_disconnect_callback(self._on_adapter_disconnected)
+        adapter.set_reconnect_callback(self._on_adapter_reconnected)
+
+        self._adapters.append(adapter)
+        logger.info(f"Adapter registered: venue_id={adapter.venue_id}")
 
     def add_actor(
         self,
@@ -75,6 +109,9 @@ class LiveEngine:
         ``events`` is a set of event-kind strings ("bar", "tick",
         "order_filled", "signal:my_signal", etc.). Unknown kinds raise
         UnknownEventKindError immediately (typo guard).
+
+        At registration the actor's ``self.cache`` is bound to the
+        engine's MarketCache so the actor can read market state.
         """
         if self._running:
             raise RuntimeError("Cannot add_actor while engine is running")
@@ -92,6 +129,8 @@ class LiveEngine:
             scheduler=self.scheduler,
             event_bus=self.event_bus,
         )
+        # Bind the cache too — engine owns it, actors read from it
+        actor.cache = self.cache  # type: ignore[attr-defined]
 
         # Each actor gets its own subscriber on the bus
         actor.__kairos_subscriber__ = self.event_bus.subscribe(  # type: ignore[attr-defined]
@@ -100,19 +139,53 @@ class LiveEngine:
         self._actors.append(actor)
         logger.info(f"Actor {actor_name!r} registered for {sorted(events_set)}")
 
-    def add_strategy(self, strategy: Any) -> None:
-        """Register a strategy. (Strategy class wiring lands next phase.)"""
-        if self._running:
-            raise RuntimeError("Cannot add_strategy while engine is running")
-        self._strategies.append(strategy)
-        logger.info(f"Strategy {type(strategy).__name__} registered")
+    def add_strategy(
+        self,
+        strategy: Actor,
+        *,
+        events: Iterable[str] | None = None,
+        name: str | None = None,
+    ) -> None:
+        """Register a strategy. Sugar over ``add_actor`` for the strategy
+        Actor pattern.
+
+        Strategies in v0.2.1+ are Actor-shaped: they subscribe to bar +
+        order_filled events, may submit orders, and have access to the
+        cache + scheduler + bus via the Actor base.
+
+        If the strategy exposes ``symbol`` and ``timeframe`` attributes
+        (the convention in V3StrategyActor), the engine remembers them
+        and will instruct each registered adapter to subscribe to that
+        ``(symbol, timeframe)`` stream on connect.
+        """
+        events_set = frozenset(events) if events else _STRATEGY_DEFAULT_EVENTS
+        actor_name = name or f"{type(strategy).__name__}#{len(self._actors)}"
+        self.add_actor(strategy, events=events_set, name=actor_name)
+
+        # If the strategy declared a (symbol, timeframe), remember it
+        # so we can subscribe the adapter on connect.
+        symbol = getattr(strategy, "symbol", "")
+        timeframe = getattr(strategy, "timeframe", "")
+        if symbol and timeframe:
+            sub = (symbol, timeframe)
+            if sub not in self._strategy_subscriptions:
+                self._strategy_subscriptions.append(sub)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Start the engine: invoke on_start on actors, run the loops.
+        """Start the engine.
 
-        Returns when ``stop()`` is called (or SIGTERM/SIGINT received).
+        Sequence:
+          1. Connect every registered adapter
+          2. Subscribe each adapter to every (symbol, timeframe) declared
+             by registered strategies
+          3. Invoke ``on_start`` on every actor
+          4. Spawn one consumer task per actor + the scheduler
+          5. Block until ``stop()`` is called or SIGTERM/SIGINT received
+          6. Graceful shutdown: drain queues, on_stop, disconnect adapters
+
+        Returns when ``stop()`` is called.
         """
         if self._running:
             raise RuntimeError("Engine already running")
@@ -121,22 +194,46 @@ class LiveEngine:
 
         logger.info(
             f"LiveEngine starting "
-            f"(actors={len(self._actors)} strategies={len(self._strategies)})"
+            f"(adapters={len(self._adapters)} actors={len(self._actors)} "
+            f"strategy-subs={len(self._strategy_subscriptions)})"
         )
 
-        # Lifecycle: on_start
+        # 1. Connect adapters
+        for adapter in self._adapters:
+            try:
+                await adapter.connect()
+            except Exception as exc:
+                logger.error(f"Adapter {adapter.venue_id} connect failed: {exc}")
+                # Continue with degraded state — strategies will get no events
+
+        # 2. Subscribe adapters to strategy streams
+        for symbol, timeframe in self._strategy_subscriptions:
+            for adapter in self._adapters:
+                try:
+                    await adapter.subscribe_bars(symbol, timeframe)
+                except Exception as exc:
+                    logger.error(
+                        f"Adapter {adapter.venue_id} subscribe_bars "
+                        f"({symbol}, {timeframe}) failed: {exc}"
+                    )
+
+        # 3. Lifecycle: on_start
         for actor in self._actors:
             await self._invoke(actor, actor.on_start, ())
 
-        # Spawn one consumer task per actor + the scheduler
+        # 4. Spawn consumer task per actor + scheduler
         for actor in self._actors:
             sub = actor.__kairos_subscriber__  # type: ignore[attr-defined]
             self._consumer_tasks.append(
-                asyncio.create_task(self._consume(actor, sub), name=f"consume-{actor._name}"),
+                asyncio.create_task(
+                    self._consume(actor, sub), name=f"consume-{actor._name}",
+                ),
             )
-        self._scheduler_task = asyncio.create_task(self.scheduler.run(), name="scheduler")
+        self._scheduler_task = asyncio.create_task(
+            self.scheduler.run(), name="scheduler",
+        )
 
-        # Wait for shutdown signal
+        # 5. Block until shutdown
         try:
             await self._shutdown_event.wait()
         finally:
@@ -146,6 +243,50 @@ class LiveEngine:
         """Signal the engine to shut down. ``run()`` returns shortly after."""
         logger.info("Stop requested")
         self._shutdown_event.set()
+
+    # ── Adapter callbacks (engine-internal — adapter calls these) ──
+
+    async def _on_bar_from_adapter(self, bar: Any) -> None:
+        """A bar arrived from an adapter. Update cache + publish."""
+        try:
+            timeframe = getattr(bar, "timeframe", "")
+            self.cache.ingest_bar(bar, timeframe=timeframe)
+        except Exception as exc:
+            logger.error(f"Cache ingest_bar failed: {exc}")
+        await self.event_bus.publish("bar", bar)
+
+    async def _on_tick_from_adapter(self, symbol: str, price: float) -> None:
+        """A tick arrived. Update cache + publish."""
+        try:
+            self.cache.ingest_tick(symbol, price)
+        except Exception as exc:
+            logger.error(f"Cache ingest_tick failed: {exc}")
+        await self.event_bus.publish("tick", (symbol, price))
+
+    async def _on_fill_from_adapter(self, fill: Any) -> None:
+        """A fill arrived. Update cache (position netting) + publish."""
+        try:
+            self.cache.ingest_fill(fill)
+        except Exception as exc:
+            logger.error(f"Cache ingest_fill failed: {exc}")
+        await self.event_bus.publish("order_filled", fill)
+
+    async def _on_order_update_from_adapter(self, order: Any) -> None:
+        """An order changed state (accepted, partially_filled, ...)."""
+        try:
+            self.cache.ingest_order(order)
+        except Exception as exc:
+            logger.error(f"Cache ingest_order failed: {exc}")
+        # Publish as order_accepted for now; richer routing per status in v0.2.2+
+        await self.event_bus.publish("order_accepted", order)
+
+    async def _on_adapter_disconnected(self, venue_id: str) -> None:
+        logger.warning(f"Adapter {venue_id} disconnected")
+        await self.event_bus.publish("adapter_disconnected", venue_id)
+
+    async def _on_adapter_reconnected(self, venue_id: str) -> None:
+        logger.info(f"Adapter {venue_id} reconnected — reconciliation may run")
+        await self.event_bus.publish("adapter_reconnected", venue_id)
 
     # ── Event consumption ──────────────────────────────────────────
 
@@ -167,6 +308,7 @@ class LiveEngine:
             if kind == "bar":
                 actor.on_bar(event)
             elif kind == "tick":
+                # tick event is (symbol, price) tuple
                 actor.on_tick(event)
             elif kind == "order_filled":
                 actor.on_order_filled(event)
@@ -212,7 +354,7 @@ class LiveEngine:
     # ── Shutdown ────────────────────────────────────────────────────
 
     async def _shutdown(self, *, timeout: float) -> None:
-        """Drain queues, call on_stop, cancel tasks. Best-effort within ``timeout``."""
+        """Drain queues, call on_stop, cancel tasks, disconnect adapters."""
         logger.info("LiveEngine shutting down…")
 
         # Stop the scheduler (no new timer fires)
@@ -242,6 +384,13 @@ class LiveEngine:
                     f"Actor {actor._name!r}.on_stop() exceeded 5s, continuing shutdown"
                 )
 
+        # Disconnect adapters
+        for adapter in self._adapters:
+            try:
+                await adapter.disconnect()
+            except Exception as exc:
+                logger.warning(f"Adapter {adapter.venue_id} disconnect: {exc}")
+
         self.event_bus.close()
         self._running = False
         logger.info("LiveEngine stopped")
@@ -269,3 +418,7 @@ class LiveEngine:
     @property
     def healthy_actor_count(self) -> int:
         return sum(1 for a in self._actors if a.healthy)
+
+    @property
+    def adapter_count(self) -> int:
+        return len(self._adapters)

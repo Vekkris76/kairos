@@ -1,0 +1,34 @@
+[project]
+name = "autopilot-engine"
+version = "0.1.99"
+description = "DEPRECATED — renamed to kairos-engine. Install 'kairos-engine' instead."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Kairos / Trading Autopilot", email = "noreply@trading-autopilot.dev" }]
+keywords = ["trading", "deprecated", "kairos"]
+classifiers = [
+    "Development Status :: 7 - Inactive",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+# Pull in the renamed package so existing imports keep working.
+dependencies = [
+    "kairos-engine>=0.2.0a0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Vekkris76/kairos"
+"Renamed package" = "https://pypi.org/project/kairos-engine/"
+
+[tool.setuptools]
+packages = ["autopilot"]
+
+[build-system]
+requires = ["setuptools>=70.0"]
+build-backend = "setuptools.build_meta"

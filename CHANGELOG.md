@@ -2,6 +2,23 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.2.3] — 2026-04-13 — *Binance Ed25519 key support*
+
+Binance Spot accepts two API-key types: HMAC-SHA256 (alphanumeric secret) and Ed25519 (Base64-encoded PKCS#8 DER private key). CCXT's Binance client auto-detects Ed25519 **only when the secret is wrapped in PEM envelope** — raw Base64 DER is silently treated as HMAC and signed incorrectly, causing `-1022 Signature for this request is not valid` on every signed call.
+
+### Fixed
+
+- **`BinanceAdapter` now accepts both key types.** A new `_normalize_binance_secret` helper detects raw Base64 DER (prefix `MC4C` / `MFMC`) and wraps it in PEM before passing to CCXT. HMAC secrets pass through untouched. Plain PEM-wrapped Ed25519 secrets are preserved. Callers don't need to know which flavor they have — pass the secret as Binance gave it.
+- Verified against a live Binance mainnet account: Ed25519 key fetched `/api/v3/account` successfully, including balance retrieval.
+
+### Tests
+
+**216 passing** (209 → 216): 7 new tests for `_normalize_binance_secret` covering HMAC pass-through, whitespace stripping, both Ed25519 prefix variants (`MC4C`/`MFMC`), PEM-already-wrapped idempotency, and an end-to-end synthetic-key round-trip that signs 64-byte Ed25519 signatures.
+
+### Migration from 0.2.2
+
+No breaking changes. Existing HMAC-key callers see identical behavior. Ed25519 callers that were manually PEM-wrapping their secrets before calling Kairos can stop doing that — the adapter handles it now.
+
 ## [0.2.2] — 2026-04-12 — *BinanceLive user-data WebSocket*
 
 Closes the last stub in the v0.2 live adapter: **real-time fills from Binance via the user-data stream**. Before this release, `BinanceLive._fetch_listen_key` and `BinanceLive._user_ws_session` raised `NotImplementedError` and adapters fell back to reconciliation polling. Now the live adapter is wire-complete.

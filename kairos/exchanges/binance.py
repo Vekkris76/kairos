@@ -26,8 +26,35 @@ TIMEFRAME_MAP = {
 }
 
 
+# Binance Spot supports two key types:
+#   - HMAC-SHA256: plain alphanumeric 64-char secret
+#   - Ed25519: PKCS#8 DER private key, Base64-encoded. When Base64'd the
+#     DER bytes always start with ``MC4C`` (DER tags 0x30 0x2e 0x02) or
+#     ``MFMC`` depending on the encoding variant.
+#
+# CCXT's Binance client auto-detects Ed25519 ONLY when the secret is
+# wrapped in PEM envelope (``-----BEGIN PRIVATE KEY-----...``). Raw
+# Base64 DER is treated as HMAC and signed incorrectly → Binance replies
+# ``-1022 Signature for this request is not valid``.
+#
+# We normalize the secret at construction so downstream CCXT calls work
+# regardless of which format the caller provides.
+def _normalize_binance_secret(secret: str) -> str:
+    """If ``secret`` is a raw Base64 Ed25519 key, wrap it in PEM."""
+    s = secret.strip()
+    if s.startswith(("MC4C", "MFMC")) and "BEGIN" not in s:
+        return f"-----BEGIN PRIVATE KEY-----\n{s}\n-----END PRIVATE KEY-----"
+    return s
+
+
 class BinanceAdapter(ExchangeAdapter):
-    """Live Binance Spot exchange adapter."""
+    """Live Binance Spot exchange adapter.
+
+    Supports both HMAC-SHA256 and Ed25519 keys transparently — pass the
+    secret exactly as Binance gave you (raw alphanumeric HMAC or
+    Base64-encoded PKCS#8 DER Ed25519) and the adapter figures out the
+    rest.
+    """
 
     def __init__(
         self,
@@ -38,7 +65,7 @@ class BinanceAdapter(ExchangeAdapter):
     ) -> None:
         self._exchange = ccxt.binance({
             "apiKey": api_key,
-            "secret": api_secret,
+            "secret": _normalize_binance_secret(api_secret),
             "options": {"defaultType": "spot"},
             "enableRateLimit": True,
         })

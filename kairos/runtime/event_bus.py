@@ -29,6 +29,7 @@ EventKind = Literal[
     "order_filled",
     "adapter_disconnected",
     "adapter_reconnected",
+    "strategy_signal",
     "shutdown",
 ]
 
@@ -40,6 +41,7 @@ KNOWN_KINDS: frozenset[str] = frozenset({
     "order_filled",
     "adapter_disconnected",
     "adapter_reconnected",
+    "strategy_signal",
     "shutdown",
 })
 

@@ -7,7 +7,7 @@ layer on top: adaptivity. See https://github.com/Vekkris76/kairos for the full v
 Renamed from `autopilot-engine` at v0.2.0a0.
 """
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 
 from kairos.engine import Engine
 from kairos.strategy import Strategy
@@ -40,6 +40,7 @@ from kairos.runtime import (
     TestClock,
 )
 from kairos.strategies import LiveStrategy
+from kairos.types import StrategySignal
 
 __all__ = [
     "__version__",
@@ -78,4 +79,6 @@ __all__ = [
     "StaticProvider",
     # v0.2.1 strategy base for LiveEngine
     "LiveStrategy",
+    # v0.3 signal-emission (pub/sub for shared-engine setups)
+    "StrategySignal",
 ]

@@ -39,6 +39,7 @@ Subclassing pattern::
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from kairos.actors import Actor, ActorConfig
@@ -241,3 +242,75 @@ class LiveStrategy(Actor):
         except Exception as exc:
             self.log.error(f"buy_bracket_pct failed: {exc}")
             return False
+
+    # ── Signal emission (for shared-engine / multi-tenant setups) ──
+
+    def emit_signal(
+        self,
+        action: str,
+        *,
+        pct_of_capital: float = 0.0,
+        sl_atr_mult: float | None = None,
+        tp_atr_mult: float | None = None,
+        price_level: float | None = None,
+        order_ref: str | None = None,
+        reason: str = "",
+        symbol: str | None = None,
+    ) -> None:
+        """Publish a ``StrategySignal`` on the engine's event bus.
+
+        Fire-and-forget from the caller's perspective: synchronous to
+        call, delivery is async via the bus. Mirrors ``publish_signal``
+        on ``Actor`` for consistency.
+
+        Use alongside (or instead of) direct ``submit_order`` /
+        ``buy_bracket_pct`` calls. Downstream consumers — typically a
+        signal dispatcher in multi-tenant setups — subscribe to
+        ``"strategy_signal"`` and fan out per-user orders using each
+        user's capital, keys, and risk profile.
+
+        Does nothing if the engine's event bus isn't bound yet
+        (pre-``on_start``) — logs at debug level. Never raises.
+
+        The ``strategy`` field of the emitted ``StrategySignal`` is set
+        from the strategy class name, suffix-stripped (e.g.
+        ``DCASignalStrategy`` → ``dcasignal``, lower-cased).
+
+        Parameters mirror the ``StrategySignal`` dataclass — see
+        ``kairos.types.StrategySignal`` for field semantics.
+        """
+        import asyncio
+        import time
+
+        from kairos.types import StrategySignal
+
+        if self._event_bus is None:
+            # pre-registration call — both log and bus may be absent
+            logger = getattr(self, "log", None) or logging.getLogger(
+                "kairos.live_strategy",
+            )
+            logger.debug(
+                f"emit_signal({action}) skipped — event_bus not bound yet"
+            )
+            return
+
+        cls = type(self).__name__
+        strategy = cls[:-len("Strategy")] if cls.endswith("Strategy") else cls
+        strategy = strategy.lower().replace(" ", "_")
+
+        signal = StrategySignal(
+            strategy=strategy,
+            symbol=symbol or self.symbol,
+            action=action,
+            pct_of_capital=float(pct_of_capital),
+            sl_atr_mult=sl_atr_mult,
+            tp_atr_mult=tp_atr_mult,
+            price_level=price_level,
+            order_ref=order_ref,
+            reason=reason,
+            ts_ns=time.time_ns(),
+        )
+
+        asyncio.create_task(
+            self._event_bus.publish("strategy_signal", signal)
+        )

@@ -139,3 +139,36 @@ class Balance:
     @property
     def total(self) -> float:
         return self.free + self.locked
+
+
+@dataclass(frozen=True)
+class StrategySignal:
+    """A strategy's decision to act, agnostic to how it gets executed.
+
+    Strategies publish ``StrategySignal`` instances on the engine's
+    ``"strategy_signal"`` event topic. In single-tenant setups, the same
+    strategy also calls its adapter directly (dual-write); a downstream
+    consumer (signal dispatcher in multi-tenant setups) can translate
+    the signal into per-user orders using per-user capital and keys.
+
+    The field set was designed by the Trading Autopilot pivot-to-shared-
+    engine-saas change — see that change's ``design.md`` (D1) for
+    rationale.
+
+    Actions currently understood by downstream consumers:
+      - ``"buy_bracket"``  — open long with atomic SL + TP
+      - ``"sell_all"``     — close full open position
+      - ``"grid_entry"``   — post a single grid LIMIT order
+      - ``"grid_cancel"``  — cancel a specific grid LIMIT by id
+    """
+
+    strategy: str
+    symbol: str
+    action: str
+    pct_of_capital: float = 0.0
+    sl_atr_mult: float | None = None
+    tp_atr_mult: float | None = None
+    price_level: float | None = None
+    order_ref: str | None = None
+    reason: str = ""
+    ts_ns: int = 0

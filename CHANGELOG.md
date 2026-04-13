@@ -2,6 +2,47 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.0] — 2026-04-13 — *Strategy signal emission*
+
+Strategies can now publish their decisions to the engine's event bus as `StrategySignal` events, enabling downstream consumers (e.g. a multi-tenant signal dispatcher) to fan out per-user orders without each strategy needing to know about users.
+
+### Added
+
+- **`StrategySignal` dataclass** (`kairos.types`, exported from `kairos`): frozen, action-based decision record with fields `strategy`, `symbol`, `action`, `pct_of_capital`, `sl_atr_mult`, `tp_atr_mult`, `price_level`, `order_ref`, `reason`, `ts_ns`. Actions currently documented: `buy_bracket`, `sell_all`, `grid_entry`, `grid_cancel`.
+
+- **`LiveStrategy.emit_signal(action, **kwargs)`**: fire-and-forget helper mirroring `Actor.publish_signal`. Builds a `StrategySignal` (strategy name derived from class name), publishes on `"strategy_signal"`. Safe to call before registration (no-op with debug log) — never raises.
+
+- **`"strategy_signal"` registered in `KNOWN_KINDS`**: subscribers can listen without tripping `UnknownEventKindError`.
+
+### Tests
+
+**227 passing** (216 → 227): 11 new tests for `StrategySignal` construction, event-bus registration, `emit_signal` publishing mechanics (single + multi-subscriber), strategy-name derivation from class, symbol override, and pre-registration safety.
+
+### Migration from 0.2.3
+
+Fully additive. Existing strategies keep working unchanged. To adopt the new pattern:
+
+```python
+# Before (single-tenant submit_order only):
+async def on_bar_ready(self, bar):
+    if self.rsi() < 30:
+        await self.buy_bracket_pct(15.0, atr_multiplier=2.0)
+
+# After (dual-write: both submit directly AND broadcast for dispatchers):
+async def on_bar_ready(self, bar):
+    if self.rsi() < 30:
+        self.emit_signal(
+            "buy_bracket",
+            pct_of_capital=0.15,
+            sl_atr_mult=2.0,
+            tp_atr_mult=2.0,
+            reason="RSI oversold",
+        )
+        await self.buy_bracket_pct(15.0, atr_multiplier=2.0)
+```
+
+The direct submission continues to work for single-tenant setups; the signal unlocks multi-tenant dispatch.
+
 ## [0.2.3] — 2026-04-13 — *Binance Ed25519 key support*
 
 Binance Spot accepts two API-key types: HMAC-SHA256 (alphanumeric secret) and Ed25519 (Base64-encoded PKCS#8 DER private key). CCXT's Binance client auto-detects Ed25519 **only when the secret is wrapped in PEM envelope** — raw Base64 DER is silently treated as HMAC and signed incorrectly, causing `-1022 Signature for this request is not valid` on every signed call.

@@ -55,9 +55,20 @@ _BINANCE_REST_TEST = "https://testnet.binance.vision"
 _BINANCE_WS_PROD = "wss://stream.binance.com:9443/ws"
 _BINANCE_WS_TEST = "wss://stream.testnet.binance.vision/ws"
 
+# Binance WS-API — used for listenKey lifecycle (userDataStream.start /
+# .ping / .stop). The legacy REST endpoint `POST /api/v3/userDataStream`
+# was retired by Binance (returns 410 Gone from nginx); WS-API is the
+# only supported path today and works for both HMAC + Ed25519 keys.
+_BINANCE_WS_API_PROD = "wss://ws-api.binance.com:443/ws-api/v3"
+_BINANCE_WS_API_TEST = "wss://ws-api.testnet.binance.vision/ws-api/v3"
+
 # Binance sends a listenKey that expires 60 min after its last keepalive.
 # We refresh every 30 min per Binance's own recommendation.
 _LISTEN_KEY_KEEPALIVE_SECONDS = 30 * 60
+
+# WS-API request/response timeout for listenKey ops. Generous — we only
+# hit this on connect, reconnect, or keepalive (every 30 min).
+_WS_API_TIMEOUT = 15.0
 
 
 def _map_binance_order_status(status: str | None) -> OrderStatus:
@@ -341,33 +352,64 @@ class BinanceLive:
 
     # ── User-data WebSocket internals ─────────────────────────────
 
-    async def _fetch_listen_key(self) -> str:
-        """Request a Binance listenKey (gateway to the user-data WS).
+    def _ws_api_url(self) -> str:
+        return _BINANCE_WS_API_TEST if self._testnet else _BINANCE_WS_API_PROD
 
-        Binance spot testnet historically returned 410 Gone here; current
-        ``testnet.binance.vision`` returns a valid key. If it fails, caller
-        catches the exception and continues with reconciliation-only mode.
+    async def _ws_api_call(self, method: str, params: dict) -> dict:
+        """Send one request to the Binance WS-API and return the result.
+
+        Opens a short-lived connection, sends one message, reads one
+        reply, closes. Used for listenKey lifecycle (start / ping /
+        stop). Raises on non-200 Binance statuses or transport errors.
         """
-        import httpx
+        import uuid
 
-        url = f"{self._rest_base()}/api/v3/userDataStream"
-        headers = {"X-MBX-APIKEY": self._api_key}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            key = data.get("listenKey")
-            if not key:
-                raise RuntimeError(
-                    f"BinanceLive: listenKey missing from response: {data}"
-                )
-            logger.debug(f"BinanceLive: fetched listenKey ({len(key)} chars)")
-            return key
+        import websockets
+
+        request_id = uuid.uuid4().hex
+        payload = json.dumps({
+            "id": request_id,
+            "method": method,
+            "params": params,
+        })
+        async with websockets.connect(
+            self._ws_api_url(),
+            open_timeout=_WS_API_TIMEOUT,
+            close_timeout=_WS_API_TIMEOUT,
+            ping_interval=None,  # short-lived, no need
+        ) as ws:
+            await asyncio.wait_for(ws.send(payload), timeout=_WS_API_TIMEOUT)
+            raw = await asyncio.wait_for(ws.recv(), timeout=_WS_API_TIMEOUT)
+        msg = json.loads(raw)
+        status = msg.get("status")
+        if status != 200:
+            err = msg.get("error") or {}
+            raise RuntimeError(
+                f"BinanceLive WS-API {method} failed: status={status} "
+                f"code={err.get('code')} msg={err.get('msg')}"
+            )
+        return msg.get("result") or {}
+
+    async def _fetch_listen_key(self) -> str:
+        """Request a Binance listenKey via the WS-API (modern endpoint).
+
+        Replaces the legacy REST ``POST /api/v3/userDataStream`` which
+        Binance retired in 2024 (returns 410 Gone from nginx). Works
+        for both HMAC and Ed25519 keys.
+        """
+        result = await self._ws_api_call(
+            "userDataStream.start", {"apiKey": self._api_key},
+        )
+        key = result.get("listenKey")
+        if not key:
+            raise RuntimeError(
+                f"BinanceLive: listenKey missing from WS-API response: {result}"
+            )
+        logger.debug(f"BinanceLive: fetched listenKey ({len(key)} chars) via WS-API")
+        return key
 
     async def _keepalive_listen_key(self) -> None:
         """Ping Binance every 30 min to keep the listenKey alive."""
-        import httpx
-
         while self._connected and self._user_ws_listen_key is not None:
             try:
                 await asyncio.sleep(_LISTEN_KEY_KEEPALIVE_SECONDS)
@@ -376,12 +418,13 @@ class BinanceLive:
             if not self._connected or self._user_ws_listen_key is None:
                 return
             try:
-                url = f"{self._rest_base()}/api/v3/userDataStream"
-                headers = {"X-MBX-APIKEY": self._api_key}
-                params = {"listenKey": self._user_ws_listen_key}
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.put(url, headers=headers, params=params)
-                    resp.raise_for_status()
+                await self._ws_api_call(
+                    "userDataStream.ping",
+                    {
+                        "apiKey": self._api_key,
+                        "listenKey": self._user_ws_listen_key,
+                    },
+                )
                 logger.debug("BinanceLive: listenKey keepalive OK")
             except Exception as exc:
                 # Don't kill the task — keep trying. If the key is truly
@@ -389,14 +432,14 @@ class BinanceLive:
                 logger.warning(f"BinanceLive: listenKey keepalive failed: {exc}")
 
     async def _close_listen_key(self, listen_key: str) -> None:
-        """DELETE the listenKey (polite cleanup on disconnect)."""
-        import httpx
-
-        url = f"{self._rest_base()}/api/v3/userDataStream"
-        headers = {"X-MBX-APIKEY": self._api_key}
-        params = {"listenKey": listen_key}
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.delete(url, headers=headers, params=params)
+        """Stop the listenKey (polite cleanup on disconnect)."""
+        try:
+            await self._ws_api_call(
+                "userDataStream.stop",
+                {"apiKey": self._api_key, "listenKey": listen_key},
+            )
+        except Exception as exc:
+            logger.debug(f"BinanceLive: listenKey stop failed (ignored): {exc}")
 
     async def _run_user_ws(self) -> None:
         """Long-running task: maintain the user-data WS, forward fills.

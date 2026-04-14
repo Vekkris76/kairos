@@ -2,6 +2,33 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.1] — 2026-04-14 — *Binance user-data WS via WS-API*
+
+### Fixed
+
+- **`BinanceLive._fetch_listen_key`**: migrated from the retired
+  `POST /api/v3/userDataStream` REST endpoint (returns 410 Gone from
+  Binance's nginx since early 2024) to the modern WebSocket API at
+  `wss://ws-api.binance.com:443/ws-api/v3` using
+  `userDataStream.start`. Works for both HMAC and Ed25519 keys;
+  real-time fills + order updates flow again on mainnet.
+
+### Changed
+
+- `_keepalive_listen_key` and `_close_listen_key` likewise routed
+  through WS-API (`userDataStream.ping` / `.stop`).
+- New helper `_ws_api_call(method, params)` — short-lived WS, one
+  request/response, common error handling for all three lifecycle
+  ops.
+- Added WS-API endpoint constants (prod + testnet variants).
+
+### Notes
+
+No API changes. Existing `BinanceLive(api_key=..., api_secret=...,
+testnet=...)` callers are unaffected. Live-tested against mainnet
+with operator Ed25519 keys → listenKey fetched, pinged, stopped
+cleanly.
+
 ## [0.3.0] — 2026-04-13 — *Strategy signal emission*
 
 Strategies can now publish their decisions to the engine's event bus as `StrategySignal` events, enabling downstream consumers (e.g. a multi-tenant signal dispatcher) to fan out per-user orders without each strategy needing to know about users.

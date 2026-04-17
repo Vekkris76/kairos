@@ -1,180 +1,162 @@
 # Kairos
 
 [![CI](https://github.com/Vekkris76/kairos/actions/workflows/ci.yml/badge.svg)](https://github.com/Vekkris76/kairos/actions/workflows/ci.yml)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![PyPI](https://img.shields.io/pypi/v/kairos-engine.svg)](https://pypi.org/project/kairos-engine/)
-[![Tests](https://img.shields.io/badge/tests-181%20passing-brightgreen.svg)](https://github.com/Vekkris76/kairos/tree/main/tests)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://img.shields.io/badge/tests-227%20passing-brightgreen.svg)](https://github.com/Vekkris76/kairos/tree/main/tests)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **Κairós** (καιρός) — ancient Greek for *"the opportune moment"*.
-> In trading, timing is everything.
+An event-driven trading engine for Python — live execution, backtesting
+and paper trading with one API. Built for spot crypto, designed to
+scale to multi-venue and derivatives.
 
-**Kairos is an adaptive crypto trading engine.** It curates the best primitives from the open-source ecosystem (ccxt for connectivity, pandas-ta for math, hummingbot patterns for reconnect) and adds a single proprietary layer on top: **adaptivity**. Adaptive execution, adaptive risk, adaptive parameter tuning, regime-aware everything — and an **IngestionActor** that surveys the open-source ecosystem weekly and incorporates improvements automatically.
+---
 
-## Status
-
-- **v0.1.x** (shipped): backtesting + paper trading + Binance Spot adapter + 12 indicators + order manager + risk validator + strategy marketplace + analytics + `parity` module
-- **v0.2.x** (shipped): live runtime + actors + market cache + atomic bracket orders with OCO + reconciliation + Binance live adapter + design hooks for adaptive features
-- **v0.3+ → v1.0** (roadmap): the differentiators — adaptive execution, behavioral risk, continual tuning, IngestionActor, why-cards, counterfactual shadow, federated learning, signed track records
-
-See [`docs/vision.md`](docs/vision.md) for the full product vision.
-
-## Notable history
-
-This package was published as **`autopilot-engine`** at v0.1.0 (March 2026). It was renamed to **`kairos-engine`** at v0.2.0a0 to reflect its evolution into an adaptive engine with proprietary IP. The legacy `autopilot-engine` PyPI name remains available with a deprecation alias for 6 months.
-
-## Quick start
+## Installation
 
 ```bash
 pip install kairos-engine
 ```
 
+Requires Python 3.11 or newer.
+
+## Quick start
+
 ```python
-from kairos import Engine, Strategy
+from kairos import LiveEngine, LiveStrategy, BinanceLive
+from kairos.types import ActorConfig
 
-class MyBot(Strategy):
-    def setup(self):
-        self.add_ema(8, "fast")
-        self.add_ema(21, "slow")
-        self.add_rsi(14)
 
-    def on_bar(self, bar):
-        if self.fast_ema() > self.slow_ema() and self.rsi() > 50:
-            self.buy(15)        # 15% of balance
-        elif self.fast_ema() < self.slow_ema():
-            self.sell_all()
+class MeanReversion(LiveStrategy):
+    def on_start(self):
+        self.sma = self.indicator.sma("close", window=20)
+        self.rsi = self.indicator.rsi(window=14)
 
-engine = Engine(exchange="binance", api_key="...", api_secret="...")
-engine.add(MyBot, symbol="BTCUSDC", timeframe="1h")
-engine.add(MyBot, symbol="ETHUSDC", timeframe="1h")
-engine.run()
+    async def on_bar(self, bar):
+        if self.rsi.value < 30 and bar.close < self.sma.value:
+            await self.buy_bracket_pct(
+                pct=0.10,          # 10% of USDC balance
+                sl_atr_mult=2.0,   # stop-loss = entry - 2×ATR
+                tp_atr_mult=3.0,   # take-profit = entry + 3×ATR
+            )
+
+
+engine = LiveEngine()
+engine.register_adapter(BinanceLive(api_key="...", api_secret="..."))
+engine.add_strategy(
+    MeanReversion(ActorConfig(symbol="BTCUSDC", timeframe="1h")),
+)
+await engine.run()
 ```
 
-## What makes Kairos different
+A ten-minute tutorial lives in [`docs/getting-started.md`](docs/getting-started.md).
 
-The pitch in one sentence: **the only trading framework that improves itself by learning from the entire open-source ecosystem**.
+## What's in the box
 
-### The curation principle
+| Area | Capability |
+|---|---|
+| **Runtime** | Async event loop · actor model · market-data cache · warmup gating |
+| **Strategies** | `LiveStrategy` base class · 12 built-in indicators · bar + tick hooks |
+| **Execution** | Market / limit / stop / bracket orders · OCO · atomic entry+SL+TP via `BracketManager` |
+| **Adapters** | `BinanceLive` (Spot, REST + market WS + user-data WS) · `PaperAdapter` for sims |
+| **Backtesting** | `BacktestEngine` with parquet catalog · Sharpe / Sortino / profit factor |
+| **Reconciliation** | Fill parity tooling (`kairos.parity.match_fills`) to diff engine outputs |
+| **Ops** | Structured logging · graceful shutdown · reconnect with exponential backoff |
 
-We don't reinvent. We curate the best primitives the open-source community has produced and assemble them into a coherent engine. Examples:
+227 tests cover the public surface; CI runs on Python 3.11, 3.12 and 3.13.
 
-| Primitive | Source | License | What we use it for |
-|-----------|--------|---------|--------------------|
-| Exchange transport | `ccxt` | MIT | 200+ exchanges, auth quirks handled |
-| Indicator math | `pandas-ta` | MIT | Proven implementations of EMA, RSI, ATR, etc. |
-| WebSocket reconnect | Pattern adapted from `hummingbot` | MIT | Battle-tested backoff + reconnection |
-| Order state machine | Inspired by `NautilusTrader` | LGPL (study only) | Mature design, clean-room reimplementation |
-| Strategy lifecycle | Inspired by `Jesse`, `Freqtrade` | MIT/Apache | Familiar API for the community |
+## Design goals
 
-Full list at [`CREDITS.md`](CREDITS.md). All cited in code comments. License-clean.
+1. **Stable primitives, pluggable policy.** The engine handles the
+   boring parts (event loop, reconnects, order state, reconciliation)
+   so strategies stay small and testable.
+2. **Same API for backtest, paper and live.** A strategy you write for
+   backtesting runs unchanged against a paper adapter and then against
+   a live exchange.
+3. **Composable actors.** Risk limits, parameter tuning, notifications
+   and regime detection are actors subscribed to the engine bus. Add
+   your own by subclassing `kairos.Actor`.
+4. **Readable over clever.** Typed public surface, minimal magic, every
+   decision documented in source.
 
-### The differentiation principle
+## Example — `Actor` for risk halt
 
-On top of the curated foundation, Kairos adds a single coherent layer: **adaptivity**.
+```python
+from kairos import Actor
 
-The 10 differentiators:
 
-1. **Adaptive execution** — OrderManager learns optimal order type + timing per (instrument × regime × spread)
-2. **Behavioral risk model** — ProtectionActor learns user's true risk tolerance from revealed preferences
-3. **Continual tuning** — Bayesian posterior over strategy parameters, updated per trade
-4. **Cross-asset signal fusion** — regime + factor events consumed by any strategy
-5. **Regime-aware everything** — execution, risk, sizing, UI all modulated by detected regime
-6. **Why card on every trade** — explanation record (indicators, regime, win probability, counterfactual)
-7. **Counterfactual shadow** — always-on parallel sim of alternative strategies → data-driven upgrade recommendations
-8. **Cryptographically-signed track records** — Ed25519-signed performance, not falsifiable
-9. **Federated cross-user learning** — privacy-preserving patterns, compounds with user count
-10. **IngestionActor** — the meta-improvement engine: weekly crawls NT, ccxt, Freqtrade, Jesse, hummingbot, arxiv. LLM-classifies changes. Evaluates against our backtest data. Auto-merges or proposes PRs. **This is the moat.**
+class DailyLossLimit(Actor):
+    def __init__(self, max_loss_pct: float = 3.0):
+        super().__init__()
+        self._max_loss = max_loss_pct
+        self._start_equity: float | None = None
 
-§1-9 are user-facing features. §10 is the structural differentiator: a framework that gets smarter every week without manual releases.
+    async def on_event(self, kind: str, event):
+        if kind == "equity_update":
+            if self._start_equity is None:
+                self._start_equity = event.equity
+                return
+            drawdown = (self._start_equity - event.equity) / self._start_equity
+            if drawdown >= self._max_loss / 100:
+                await self.publish_signal("risk_halt", reason="daily_loss")
+```
 
-## Features (v0.1, what works today)
+The engine's `SignalDispatcher` picks up `risk_halt` and stops new
+entries until the actor publishes a resume signal.
 
-### Core
-- Async event-driven engine with deterministic execution (paper / backtest)
-- Multi-strategy on multiple pairs simultaneously
-- 12 built-in indicators: EMA, SMA, RSI, ATR, Bollinger, MACD, Stochastic, VWAP, OBV, Donchian, ADX, HMA
-- Pre-trade risk validation (balance, lot size, notional, rate limits)
-- Real-time position tracking with PnL calculation
+## Status and versioning
 
-### Orders
-- Market, Limit, Stop-Market, Stop-Limit
-- Bracket orders (entry + SL + TP)
-- Post-only, reduce-only execution flags
+Current release: **v0.3.1** — production-deployed as the execution core
+of [Trading Autopilot](https://trading-autopilot.dev) since 2026-04-13,
+powering DCA strategies on BTCUSDC and ETHUSDC on Binance Spot.
 
-### Exchanges
-- Binance Spot (REST + WebSocket)
-- Paper exchange for backtesting / simulation
-
-### Backtest
-- Tick-level replay with parquet data catalog
-- Sharpe, Sortino, profit factor analytics
-- Walkforward parameter sweeps
-
-### Strategy marketplace
-- Registry + builder for composable strategies
-- JSON-config → Strategy class
-
-### Parity module
-- `kairos.parity.match_fills(baseline, candidate)` — compare two engine outputs (fills) with configurable tolerances, produce PASS/WARN/FAIL verdict
-- 21 unit tests, pure Python, no I/O
-- Use case: validate a new engine version against a baseline before cutover
+Semantic versioning. Pre-1.0 releases may still contain minor
+breaking changes; the CHANGELOG calls them out explicitly.
 
 ## Roadmap
 
-- **v0.2.x — Production runtime** (3-4 weeks)
-  - Live event loop with adapter registration
-  - Actor base class + event routing
-  - MarketCache with warmup gating
-  - OrderManager extensions (brackets, OCO, reconciler)
-  - Binance live adapter with user-data WebSocket
-- **v0.3 — Learning milestone** (3-4 weeks after v0.2)
-  - Adaptive execution (§1)
-  - Continual tuning (§3)
-  - Why card on every fill (§6)
-- **v0.4 — Meta-improvement milestone** (4-6 weeks)
-  - IngestionActor v1 (§10)
-  - Counterfactual shadow (§7)
-- **v0.5 — Personalization** — behavioral risk + cross-asset fusion + federated v1
-- **v0.6 — Marketplace trust** — signed track records + marketplace integration
-- **v1.0 — GA, commercial launch**
+| Milestone | Focus |
+|---|---|
+| **v0.4** | Adaptive execution — order-type + timing learned per (symbol × regime × spread) |
+| **v0.5** | Continual parameter tuning — Bayesian posterior updated per trade |
+| **v0.6** | Multi-venue — Kraken adapter + venue-registry abstraction |
+| **v1.0** | Stable public API · long-term support |
 
-Roughly 6-9 months from today to v1.0 at a steady pace. Quality > speed.
-
-## Reference customer
-
-[Trading Autopilot](https://trading-autopilot.dev) is the flagship SaaS that runs on Kairos. After v3 of Trading Autopilot ships on Kairos v0.2 (~13 weeks of migration work), every Kairos differentiator that ships will be deployed to real users running real trades.
+Details in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Documentation
 
-- [Vision](docs/vision.md) — manifesto, differentiators, moat, glossary
+- [Getting started](docs/getting-started.md) — first strategy in ten lines
 - [Architecture](docs/architecture.md) — runtime, actors, cache, execution
-- [Getting Started](docs/getting-started.md) — first strategy in 10 lines
-- [Strategy Guide](docs/strategy-guide.md) — patterns, examples, anti-patterns
-- [Indicators](docs/indicators.md) — full list + parameters
+- [Strategy guide](docs/strategy-guide.md) — patterns and anti-patterns
+- [Indicators](docs/indicators.md) — full list with parameters
 - [Backtesting](docs/backtesting.md) — data catalog, metrics, walkforward
-- [Exchange Setup](docs/exchange-setup.md) — Binance API key configuration
-- [CREDITS.md](CREDITS.md) — adopted primitives + license attribution
+- [Exchange setup](docs/exchange-setup.md) — Binance API key configuration
+- [Credits](CREDITS.md) — adopted primitives and license attribution
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Note: Kairos is moving toward a more proprietary licensing model from v1.0 onwards. v0.1.x and v0.2.x stay MIT. Contributions to v0.1.x / v0.2.x are welcome under MIT terms; contributions to v0.3+ work will be subject to the final license terms (TBD).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are
+welcome. Please run `pytest` before submitting.
+
+## Naming
+
+*Kairós* (καιρός) is the ancient Greek word for "the opportune moment".
+This package was originally published as `autopilot-engine` (v0.1.0,
+March 2026) and renamed at v0.2.0a0. The legacy PyPI name redirects
+here for deprecation notices.
 
 ## License
 
-**v0.1.x and v0.2.x: MIT** (see [LICENSE](LICENSE)).
+MIT — see [LICENSE](LICENSE). Derivatives and commercial use are both
+permitted; attribution is appreciated.
 
-The Kairos team is reviewing the license model for v1.0+. The current intent is **source-available** with **commercial-use restrictions** (similar to Business Source License or Elastic License). The MIT-licensed v0.1/v0.2 code remains MIT forever — license changes are not retroactive.
-
-If you're considering Kairos for commercial use, [open an issue](https://github.com/Vekkris76/kairos/issues) or reach out so we can keep you informed.
-
-## Citations
-
-If Kairos contributes to academic or commercial work:
+## Citation
 
 ```bibtex
 @software{kairos2026,
-  title  = {Kairos: an adaptive crypto trading engine},
-  author = {Trading Autopilot Team},
+  title  = {Kairos: an event-driven crypto trading engine for Python},
+  author = {Rovira, Oscar},
   year   = {2026},
   url    = {https://github.com/Vekkris76/kairos}
 }

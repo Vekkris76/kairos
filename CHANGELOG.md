@@ -2,6 +2,55 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.2] — 2026-04-18 — *Lifecycle submit gate*
+
+### Added
+
+- **`LiveStrategy._submit_guarded(...)`**: new helper that routes
+  single-order submits through the adapter with an optional
+  lifecycle-gate check. BUY-side submits consult
+  `self._lifecycle_gate` (a zero-argument callable returning bool);
+  SELL-side and `force=True` always pass. Fail-closed on exceptions.
+- **`LiveStrategy._submit_bracket_guarded(...)`**: the bracket
+  counterpart — same gate semantics, delegates to
+  `bracket_manager.submit_bracket(...)` on allow.
+- **`LiveEngine.add_strategy(lifecycle_gate=...)`**: new optional
+  keyword argument. Binds the callable on the strategy instance
+  (`strategy._lifecycle_gate`) so `_submit_guarded` and
+  `_submit_bracket_guarded` can consult it. Default None — no
+  behaviour change for existing callers.
+
+### Changed
+
+- `LiveStrategy.buy_bracket_pct` now routes its bracket entry
+  through `_submit_bracket_guarded`, so strategies that used the
+  canonical helper inherit the gate automatically.
+
+### Rationale
+
+Trading Autopilot's ASL (Autonomous Strategy Lifecycle) gates
+multi-user signal fan-out at the dispatcher level, but the
+`strategy → broker direct` path (via
+`bracket_manager._adapter.submit_order`) bypassed every gate. A
+SHADOW strategy could still place real orders on the host's
+adapter account. The new helpers give the host a one-line block on
+non-CHAMPION entries while keeping SELLs and cancels flowing (so a
+retired strategy can still close its own positions). The callback
+is zero-argument by design — the host closes over the per-strategy
+identifier at registration time, keeping Kairos agnostic of what a
+"lifecycle" even means.
+
+### Backward compatibility
+
+Purely additive. Every existing caller of `LiveStrategy`,
+`LiveEngine.add_strategy`, and `BracketManager.submit_bracket` sees
+identical behaviour. Opt in by passing `lifecycle_gate=` when you
+call `add_strategy`; opt out by leaving it None.
+
+See Trading Autopilot's
+`openspec/changes/strategy-lifecycle-submit-gate/` for the host-side
+integration and the 2026-04-18 incident retro that motivated it.
+
 ## [0.3.1] — 2026-04-14 — *Binance user-data WS via WS-API*
 
 ### Fixed

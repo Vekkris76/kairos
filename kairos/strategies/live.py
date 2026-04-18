@@ -44,6 +44,11 @@ from typing import Any
 
 from kairos.actors import Actor, ActorConfig
 
+# Module-level logger used as a fallback for gated-submit logging
+# when ``self.log`` hasn't been bound by the engine register step
+# yet (tests that construct a bare strategy).
+_submit_logger = logging.getLogger("kairos.live_strategy")
+
 
 class LiveStrategy(Actor):
     """Strategy base class for the LiveEngine.
@@ -72,6 +77,12 @@ class LiveStrategy(Actor):
         self._indicators: dict[str, Any] = {}
         self._default_rsi_period: int | None = None
         self._default_atr_period: int | None = None
+        # Optional lifecycle gate — set by LiveEngine.add_strategy when
+        # the host app wants to block entry submits for non-CHAMPION
+        # strategies. Callable: (strategy_name) -> bool, where True
+        # means "allow BUY submit". SELL submits always pass.
+        # See ``_submit_guarded`` below.
+        self._lifecycle_gate: Any = None
 
     # ── Indicator declaration ─────────────────────────────────────
 
@@ -188,6 +199,150 @@ class LiveStrategy(Actor):
 
     # ── Order submission shortcuts ───────────────────────────────
 
+    async def _submit_guarded(
+        self,
+        *,
+        symbol: str,
+        side: Any,
+        order_type: Any,
+        quantity: float,
+        price: float | None = None,
+        time_in_force: Any = None,
+        post_only: bool = False,
+        client_order_id: str | None = None,
+        force: bool = False,
+    ) -> Any:
+        """Submit an order through the adapter, gated by lifecycle state.
+
+        This is the ONLY entry-point strategy subclasses should use
+        for live submits — it consults ``self._lifecycle_gate`` for
+        BUY orders so a SHADOW / RETIRED / CHALLENGER strategy cannot
+        accidentally open real exposure via the
+        ``bracket_manager._adapter`` bypass.
+
+        Behaviour:
+          * ``side == OrderSide.BUY`` + gate set + gate returns False
+            → log INFO, return None (no submit).
+          * ``side == OrderSide.BUY`` + gate raises → log WARNING,
+            return None (fail-closed).
+          * ``side == OrderSide.SELL`` or any non-BUY side → bypass
+            the gate (liability-reducing; always allowed).
+          * ``force=True`` → bypass the gate regardless of side.
+          * No gate wired (``_lifecycle_gate is None``) → always
+            submit (pre-ASL behaviour).
+
+        Resolves the adapter from ``self.bracket_manager._adapter``
+        (same path the legacy direct submits used), falling back to
+        ``self.adapter`` if set. Returns the Order object on success.
+        """
+        from kairos.types import OrderSide
+
+        log = getattr(self, "log", _submit_logger)
+
+        # Gate only BUY-side entries. SELL + cancels are always safe.
+        # The gate callback takes no args — the host closes over the
+        # strategy identity at registration time (see
+        # ``LiveEngine.add_strategy(lifecycle_gate=...)``).
+        if (
+            not force
+            and side == OrderSide.BUY
+            and self._lifecycle_gate is not None
+        ):
+            try:
+                allowed = bool(self._lifecycle_gate())
+            except Exception as exc:
+                log.warning(
+                    f"Submit gate raised: {exc} — failing closed, "
+                    f"dropping {side} {quantity} {symbol}"
+                )
+                return None
+            if not allowed:
+                log.info(
+                    f"Submit gated: not CHAMPION — dropping "
+                    f"{side} {quantity} {symbol} @ {price}"
+                )
+                return None
+
+        # Resolve the adapter. Prefer the BracketManager's adapter
+        # (what the legacy direct path used) so behaviour matches.
+        adapter = None
+        if self.bracket_manager is not None:
+            adapter = getattr(self.bracket_manager, "_adapter", None)
+        if adapter is None:
+            adapter = getattr(self, "adapter", None)
+        if adapter is None:
+            log.error(
+                "_submit_guarded: no adapter available"
+            )
+            return None
+
+        return await adapter.submit_order(
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            price=price,
+            time_in_force=time_in_force,
+            post_only=post_only,
+            client_order_id=client_order_id,
+        )
+
+    async def _submit_bracket_guarded(
+        self,
+        *,
+        symbol: str,
+        side: Any,
+        quantity: float,
+        sl_price: float,
+        tp_price: float,
+        reference_price: float,
+        force: bool = False,
+    ) -> Any:
+        """Bracket-order counterpart of ``_submit_guarded``.
+
+        Gates BUY brackets on ``self._lifecycle_gate`` and delegates
+        to ``self.bracket_manager.submit_bracket(...)``. SELL brackets
+        and ``force=True`` pass through. Returns None when gated out
+        or when the bracket manager is not wired.
+        """
+        from kairos.types import OrderSide
+
+        log = getattr(self, "log", _submit_logger)
+
+        if self.bracket_manager is None:
+            log.warning(
+                "_submit_bracket_guarded: no bracket_manager wired"
+            )
+            return None
+
+        if (
+            not force
+            and side == OrderSide.BUY
+            and self._lifecycle_gate is not None
+        ):
+            try:
+                allowed = bool(self._lifecycle_gate())
+            except Exception as exc:
+                log.warning(
+                    f"Bracket gate raised: {exc} — failing closed"
+                )
+                return None
+            if not allowed:
+                log.info(
+                    f"Bracket gated: not CHAMPION — dropping BUY "
+                    f"{quantity} {symbol} @ {reference_price}"
+                )
+                return None
+
+        return await self.bracket_manager.submit_bracket(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            reference_price=reference_price,
+        )
+
     async def buy_bracket_pct(
         self,
         pct_of_balance: float,
@@ -198,7 +353,7 @@ class LiveStrategy(Actor):
 
         Returns True if the bracket was submitted; logs (does not raise)
         on validation failure (no balance, no ATR, sub-min-notional, no
-        bracket_manager wired).
+        bracket_manager wired, or lifecycle gate blocks the entry).
 
         Requires:
           - ``self.bracket_manager`` to be set (by the engine wiring)
@@ -230,7 +385,10 @@ class LiveStrategy(Actor):
             return False
 
         try:
-            await self.bracket_manager.submit_bracket(
+            # Route through the guarded bracket helper so the
+            # lifecycle gate (when wired) can block non-CHAMPION
+            # entries.
+            result = await self._submit_bracket_guarded(
                 symbol=self.symbol,
                 side=OrderSide.BUY,
                 quantity=qty,
@@ -238,7 +396,7 @@ class LiveStrategy(Actor):
                 tp_price=price + atr_multiplier * atr_val,
                 reference_price=price,
             )
-            return True
+            return result is not None
         except Exception as exc:
             self.log.error(f"buy_bracket_pct failed: {exc}")
             return False

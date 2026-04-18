@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from kairos.actors.base import Actor
@@ -145,6 +145,7 @@ class LiveEngine:
         *,
         events: Iterable[str] | None = None,
         name: str | None = None,
+        lifecycle_gate: Callable[[], bool] | None = None,
     ) -> None:
         """Register a strategy. Sugar over ``add_actor`` for the strategy
         Actor pattern.
@@ -157,10 +158,28 @@ class LiveEngine:
         (the convention in V3StrategyActor), the engine remembers them
         and will instruct each registered adapter to subscribe to that
         ``(symbol, timeframe)`` stream on connect.
+
+        ``lifecycle_gate`` is an optional zero-argument callable
+        consulted by ``LiveStrategy._submit_guarded`` and
+        ``_submit_bracket_guarded`` before every BUY submit. Return
+        True to allow; False to block (SHADOW/CHALLENGER/RETIRED
+        strategies must return False). SELL submits always pass
+        regardless of the gate. The host is expected to close over
+        the per-strategy identifier at registration time — this keeps
+        Kairos agnostic of how hosts map strategies to lifecycle
+        state (profile-form vs runtime-form naming, etc.). See Kairos 0.3.2 CHANGELOG +
+        trading-autopilot's ``strategy-lifecycle-submit-gate`` change
+        for the design rationale.
         """
         events_set = frozenset(events) if events else _STRATEGY_DEFAULT_EVENTS
         actor_name = name or f"{type(strategy).__name__}#{len(self._actors)}"
         self.add_actor(strategy, events=events_set, name=actor_name)
+
+        # Bind the optional lifecycle gate on the strategy instance so
+        # ``_submit_guarded`` / ``_submit_bracket_guarded`` can consult
+        # it. Safe when the strategy is not a LiveStrategy subclass —
+        # the attribute is just set and never read.
+        strategy._lifecycle_gate = lifecycle_gate  # type: ignore[attr-defined]
 
         # If the strategy declared a (symbol, timeframe), remember it
         # so we can subscribe the adapter on connect.

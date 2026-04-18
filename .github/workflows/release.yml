@@ -1,0 +1,96 @@
+name: Release
+
+# Triggered by pushing a `v*.*.*` tag. Runs the full pre-ship gate
+# (lint + full test suite + build + twine check) and, only on
+# success, publishes to PyPI via trusted publishing (OIDC — no
+# stored token). One-time PyPI setup instructions are in
+# docs/release.md.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+[ab][0-9]+"   # v0.3.0a0, v0.3.0b1, ...
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Pre-ship gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install Python + dependencies
+        run: |
+          uv python install 3.13
+          uv sync --all-extras --dev
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PYPROJECT_VERSION=$(uv run --quiet python -c '
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          ')
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+              echo "::error::Tag v$TAG_VERSION but pyproject.toml has $PYPROJECT_VERSION"
+              exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: CHANGELOG entry present
+        run: |
+          if ! grep -qE "^## \[${{ steps.version.outputs.version }}\]" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [${{ steps.version.outputs.version }}]' entry"
+              exit 1
+          fi
+
+      - name: Lint
+        run: uv run ruff check kairos/ tests/
+
+      - name: Full test suite
+        run: uv run pytest tests/ -q
+
+      - name: Build wheel + sdist
+        run: |
+          rm -rf dist/
+          uv build
+
+      - name: twine check
+        run: uvx --quiet twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kairos-engine-dist
+          path: dist/
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI (trusted)
+    needs: gate
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/kairos-engine
+    permissions:
+      id-token: write   # OIDC token for trusted publishing
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: kairos-engine-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

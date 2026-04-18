@@ -2,6 +2,19 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.3] — 2026-04-18 — *`reduce_only` kwarg on `_submit_guarded`*
+
+### Fixed
+
+- `LiveStrategy._submit_guarded` now accepts `reduce_only: bool = False`
+  and forwards it to the adapter when set, matching what
+  existing v3 strategies (DCA `_sell_all_async`, EMA
+  `_close_position_async`) pass when closing positions. 0.3.2 shipped
+  without the kwarg, which surfaced as
+  `TypeError: _submit_guarded() got an unexpected keyword argument
+  'reduce_only'` the first time a DCA SELL went through the guarded
+  helper. No API change beyond adding the kwarg.
+
 ## [0.3.2] — 2026-04-18 — *Lifecycle submit gate*
 
 ### Added

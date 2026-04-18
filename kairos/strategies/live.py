@@ -209,6 +209,7 @@ class LiveStrategy(Actor):
         price: float | None = None,
         time_in_force: Any = None,
         post_only: bool = False,
+        reduce_only: bool = False,
         client_order_id: str | None = None,
         force: bool = False,
     ) -> Any:
@@ -276,16 +277,27 @@ class LiveStrategy(Actor):
             )
             return None
 
-        return await adapter.submit_order(
-            symbol=symbol,
-            side=side,
-            order_type=order_type,
-            quantity=quantity,
-            price=price,
-            time_in_force=time_in_force,
-            post_only=post_only,
-            client_order_id=client_order_id,
-        )
+        # Forward only the kwargs the adapter actually accepts. Not
+        # every adapter supports every field (PaperAdapter ignores
+        # post_only, etc.) — build the kwargs dict conditionally so
+        # older adapters stay callable.
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "quantity": quantity,
+        }
+        if price is not None:
+            kwargs["price"] = price
+        if time_in_force is not None:
+            kwargs["time_in_force"] = time_in_force
+        if post_only:
+            kwargs["post_only"] = True
+        if reduce_only:
+            kwargs["reduce_only"] = True
+        if client_order_id is not None:
+            kwargs["client_order_id"] = client_order_id
+        return await adapter.submit_order(**kwargs)
 
     async def _submit_bracket_guarded(
         self,

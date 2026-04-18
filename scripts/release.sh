@@ -107,7 +107,7 @@ green "✓ built $(basename "$WHEEL") + $(basename "$SDIST")"
 # ── 6. twine check — validate metadata ──────────────────────────
 
 echo "→ twine check"
-if ! uv run --with twine twine check "$WHEEL" "$SDIST"; then
+if ! uvx --quiet twine check "$WHEEL" "$SDIST"; then
     red "✗ twine check failed. Fix metadata before publishing."
     exit 1
 fi

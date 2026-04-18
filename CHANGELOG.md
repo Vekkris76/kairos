@@ -2,6 +2,43 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.4] — 2026-04-18 — *Release-hygiene scaffolding*
+
+### Added
+
+- `scripts/release.sh` — local pre-ship gate that runs full pytest,
+  build, and `twine check` before any `uv publish`. Fallback for
+  manual releases; validates the same invariants as the new GHA
+  workflow.
+- `.github/workflows/release.yml` — GitHub Actions trusted
+  publishing workflow. Triggered by `v*.*.*` tags. Runs the full
+  pre-ship gate (tag/pyproject version match, CHANGELOG entry
+  present, lint, pytest, build, twine check) and publishes via
+  OIDC to PyPI. Zero on-disk tokens.
+- `docs/release.md` — one-time PyPI + GitHub environment setup
+  instructions + per-release flow + failure-mode recovery.
+
+### Fixed
+
+- `.github/workflows/ci.yml` — was linting `autopilot/` (path from
+  the pre-v0.2.0 rename era, ~March 2026). Now correctly targets
+  `kairos/` + `tests/`. Adopts `uv` via `astral-sh/setup-uv@v3` for
+  parity with the release workflow.
+
+### Note on v0.3.3 commit history
+
+Commit `a2bae0f` originally tagged v0.3.3 only included the
+CHANGELOG + pyproject.toml bump — the actual `reduce_only` kwarg
+code change in `kairos/strategies/live.py` was left uncommitted at
+tag time but WAS captured in the PyPI wheel (which builds from the
+working tree). This was amended post-hoc to `dba8eaf` via
+`git commit --amend` + `git tag -f v0.3.3` + force-push. The
+0.3.3 wheel on PyPI is unaffected; git history now matches. The
+release-hygiene scaffolding shipped in 0.3.4 was built specifically
+to prevent this kind of working-tree / tag divergence going
+forward (`scripts/release.sh` rejects a publish when the tag
+doesn't point at HEAD).
+
 ## [0.3.3] — 2026-04-18 — *`reduce_only` kwarg on `_submit_guarded`*
 
 ### Fixed

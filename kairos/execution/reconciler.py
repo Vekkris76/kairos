@@ -83,7 +83,7 @@ class Reconciler:
         venue_open_ids: set[str] = {o.id for o in venue_open_orders}
         cache_orders = self._cache.orders()
         cache_open_orders = self._cache.orders_open()
-        cache_open_ids: set[str] = {o.id for o in cache_open_orders}
+        {o.id for o in cache_open_orders}
 
         # 2. Recovered: in venue, not in cache → ingest
         for venue_order in venue_open_orders:

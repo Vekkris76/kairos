@@ -34,11 +34,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from kairos.execution.policy import ExecutionContext, ExecutionPolicy, StaticPolicy
-from kairos.types import OrderSide, OrderStatus
+from kairos.types import OrderSide
 
 if TYPE_CHECKING:
     from kairos.exchanges.base import ExchangeAdapter

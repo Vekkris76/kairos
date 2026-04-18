@@ -27,7 +27,6 @@ from kairos.types import (
     Instrument,
     Order,
     OrderSide,
-    OrderStatus,
     OrderType,
     TimeInForce,
 )

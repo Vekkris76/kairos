@@ -59,7 +59,9 @@ class Bracket:
     tp_order_id: str | None = None
     sl_price: float | None = None
     tp_price: float | None = None
-    state: Literal["pending", "armed", "completed", "failed"] = "pending"
+    state: Literal[
+        "pending", "pending_fill", "armed", "completed", "failed"
+    ] = "pending"
     exit_type: Literal["tp", "sl", "manual"] | None = None
     failure_reason: str | None = None
     # Populated when the entry fill is observed via ``on_order_filled``.
@@ -67,6 +69,11 @@ class Bracket:
     # fills so downstream code (cancel, introspection) reflects reality.
     filled_qty: float | None = None
     filled_price: float | None = None
+    # Two-phase arming: SL+TP submitted after entry fill, not before.
+    two_phase: bool = False
+    # Internal — populated by submit_bracket_two_phase, consumed by _arm_exits.
+    _sl_price_pending: float | None = None
+    _tp_price_pending: float | None = None
 
 
 class BracketSubmissionError(RuntimeError):
@@ -219,6 +226,174 @@ class BracketManager:
         bracket.state = "armed"
         return bracket
 
+    # ── Two-phase submission ───────────────────────────────────────
+
+    async def submit_bracket_two_phase(
+        self,
+        *,
+        symbol: str,
+        side: OrderSide,
+        quantity: float,
+        sl_price: float,
+        tp_price: float,
+        reference_price: float,
+        bracket_id: str | None = None,
+    ) -> Bracket:
+        """Submit only the entry; arm SL+TP on the entry fill.
+
+        Unlike ``submit_bracket``, this method returns after the entry
+        submission only. SL and TP are submitted by ``on_order_filled``
+        when the entry fill arrives, using the actual ``filled_qty``
+        (not the requested ``quantity``). This eliminates SL/TP
+        over-sizing on partial fills.
+
+        Use when partial fills are a real risk (limit entries, illiquid
+        markets, paper adapter with fee simulation). For spot MARKET
+        orders on liquid pairs, ``submit_bracket`` is equivalent and
+        simpler.
+
+        Preconditions: the caller MUST ``await`` ``on_order_filled``
+        for the entry fill. The live engine's current ``_route`` does
+        not ``await`` actor hooks — wiring this into a v3 strategy
+        requires the strategy to delegate via an ``async`` bridge.
+        """
+        bid = bracket_id or f"br-{uuid.uuid4().hex[:12]}"
+        bracket = Bracket(
+            bracket_id=bid,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            two_phase=True,
+            _sl_price_pending=sl_price,
+            _tp_price_pending=tp_price,
+        )
+        self._brackets[bid] = bracket
+
+        # Submit entry only — SL/TP deferred to _arm_exits
+        entry_decision = self._policy.decide(
+            ExecutionContext(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                role="entry",
+                reference_price=reference_price,
+            )
+        )
+        try:
+            entry_order = await self._adapter.submit_order(
+                symbol=symbol,
+                side=side,
+                order_type=entry_decision.order_type,
+                quantity=quantity,
+                price=entry_decision.price,
+                stop_price=entry_decision.stop_price,
+                time_in_force=entry_decision.time_in_force,
+                post_only=entry_decision.post_only,
+            )
+            bracket.entry_order_id = entry_order.id
+            self._order_to_bracket[entry_order.id] = bid
+            bracket.state = "pending_fill"
+            logger.info(
+                f"Bracket {bid}: entry submitted two-phase "
+                f"({entry_order.id}); SL/TP armed on fill"
+            )
+        except Exception as exc:
+            bracket.state = "failed"
+            bracket.failure_reason = f"entry_submit: {exc}"
+            logger.error(f"Bracket {bid}: entry submission failed: {exc}")
+            raise
+
+        return bracket
+
+    async def _arm_exits(self, bracket: Bracket) -> None:
+        """Submit SL + TP using the actual ``filled_qty``.
+
+        Called by ``on_order_filled`` when the entry leg of a two-phase
+        bracket fills. On submission failure of either leg, the entry
+        is closed with a reverse MARKET and ``BracketSubmissionError``
+        is raised.
+        """
+        assert bracket._sl_price_pending is not None
+        assert bracket._tp_price_pending is not None
+
+        bid = bracket.bracket_id
+        filled_qty = bracket.quantity  # already updated by on_order_filled
+        exit_side = OrderSide.SELL if bracket.side == OrderSide.BUY else OrderSide.BUY
+
+        # Submit SL
+        sl_decision = self._policy.decide(
+            ExecutionContext(
+                symbol=bracket.symbol,
+                side=exit_side,
+                quantity=filled_qty,
+                role="sl",
+                reference_price=bracket._sl_price_pending,
+            )
+        )
+        try:
+            sl_order = await self._adapter.submit_order(
+                symbol=bracket.symbol,
+                side=exit_side,
+                order_type=sl_decision.order_type,
+                quantity=filled_qty,
+                price=sl_decision.price,
+                stop_price=sl_decision.stop_price,
+                time_in_force=sl_decision.time_in_force,
+                reduce_only=True,
+            )
+            bracket.sl_order_id = sl_order.id
+            self._order_to_bracket[sl_order.id] = bid
+            logger.info(
+                f"Bracket {bid}: SL armed two-phase "
+                f"({sl_order.id} @ {bracket._sl_price_pending}, qty={filled_qty})"
+            )
+        except Exception as exc:
+            await self._abort_after_entry(bracket, reason=f"two_phase sl_submit: {exc}")
+            raise BracketSubmissionError(
+                f"Bracket {bid} two-phase SL failed; entry closed. Reason: {exc}"
+            ) from exc
+
+        # Submit TP
+        tp_decision = self._policy.decide(
+            ExecutionContext(
+                symbol=bracket.symbol,
+                side=exit_side,
+                quantity=filled_qty,
+                role="tp",
+                reference_price=bracket._tp_price_pending,
+            )
+        )
+        try:
+            tp_order = await self._adapter.submit_order(
+                symbol=bracket.symbol,
+                side=exit_side,
+                order_type=tp_decision.order_type,
+                quantity=filled_qty,
+                price=tp_decision.price,
+                stop_price=tp_decision.stop_price,
+                time_in_force=tp_decision.time_in_force,
+                reduce_only=True,
+            )
+            bracket.tp_order_id = tp_order.id
+            self._order_to_bracket[tp_order.id] = bid
+            logger.info(
+                f"Bracket {bid}: TP armed two-phase "
+                f"({tp_order.id} @ {bracket._tp_price_pending}, qty={filled_qty})"
+            )
+        except Exception as exc:
+            await self._safe_cancel(bracket.symbol, bracket.sl_order_id)
+            await self._abort_after_entry(bracket, reason=f"two_phase tp_submit: {exc}")
+            raise BracketSubmissionError(
+                f"Bracket {bid} two-phase TP failed; SL cancelled, entry closed. Reason: {exc}"
+            ) from exc
+
+        bracket.state = "armed"
+        logger.info(
+            f"Bracket {bid} fully armed two-phase (filled_qty={filled_qty})"
+        )
+
     async def _abort_after_entry(self, bracket: Bracket, *, reason: str) -> None:
         """Reverse the entry with a MARKET in the opposite direction.
 
@@ -299,6 +474,10 @@ class BracketManager:
                     f"bracket.quantity updated; SL/TP remain at original size."
                 )
                 bracket.quantity = filled_qty
+            # Two-phase: arm SL+TP now that we know the real filled_qty
+            if bracket.two_phase and bracket.state == "pending_fill":
+                await self._arm_exits(bracket)
+                return None
             logger.debug(
                 f"Bracket {bid}: entry filled "
                 f"({filled_qty if filled_qty is not None else 'qty unknown'}), "

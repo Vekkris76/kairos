@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from kairos.execution.bracket_manager import (
+    Bracket,
     BracketManager,
     BracketSubmissionError,
 )
@@ -363,6 +364,151 @@ async def test_backward_compat_str_order_id_still_works() -> None:
     result = await bm.on_order_filled(bracket.tp_order_id)  # type: ignore[arg-type]
     assert result is bracket
     assert bracket.state == "completed"
+
+
+# ── Two-phase ──────────────────────────────────────────────────
+
+
+async def _simulate_entry_fill(
+    bm: BracketManager,
+    bracket: Bracket,
+    *,
+    filled_qty: float,
+    price: float = 50_000.0,
+) -> None:
+    """Construct a Fill for the bracket's entry order and dispatch it.
+
+    MockAdapter doesn't auto-fill or fire callbacks — tests drive the
+    fill event manually, mirroring what the live engine's event bus
+    would do in production.
+    """
+    assert bracket.entry_order_id is not None
+    fill = Fill(
+        order_id=bracket.entry_order_id,
+        trade_id=f"trade-{bracket.bracket_id}",
+        symbol=bracket.symbol,
+        side=bracket.side,
+        price=price,
+        quantity=filled_qty,
+        commission=0.0,
+        timestamp=1_700_000_000_000,
+    )
+    await bm.on_order_filled(fill)
+
+
+async def test_two_phase_entry_only_on_submit() -> None:
+    """submit_bracket_two_phase submits only entry — SL+TP pending fill."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket_two_phase(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+    assert bracket.state == "pending_fill"
+    assert bracket.two_phase is True
+    assert len(adapter.submitted) == 1           # only entry
+    assert adapter.submitted[0]["role"] == "entry"
+    assert bracket.sl_order_id is None
+    assert bracket.tp_order_id is None
+
+
+async def test_two_phase_full_fill_arms_sl_tp_with_correct_qty() -> None:
+    """Full fill: SL+TP armed with filled_qty=0.1."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket_two_phase(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+
+    await _simulate_entry_fill(bm, bracket, filled_qty=0.1)
+
+    assert bracket.state == "armed"
+    assert bracket.sl_order_id is not None
+    assert bracket.tp_order_id is not None
+    assert len(adapter.submitted) == 3           # entry + SL + TP
+    sl = next(o for o in adapter.submitted if o["role"] == "sl")
+    tp = next(o for o in adapter.submitted if o["role"] == "tp")
+    assert sl["quantity"] == 0.1
+    assert tp["quantity"] == 0.1
+
+
+async def test_two_phase_partial_fill_arms_sl_tp_with_filled_qty() -> None:
+    """Partial fill (0.06 of 0.1): SL+TP sized to 0.06, not 0.1."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket_two_phase(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+
+    await _simulate_entry_fill(bm, bracket, filled_qty=0.06)
+
+    assert bracket.state == "armed"
+    assert bracket.quantity == 0.06              # rewritten to filled_qty
+    assert bracket.filled_qty == 0.06
+    sl = next(o for o in adapter.submitted if o["role"] == "sl")
+    tp = next(o for o in adapter.submitted if o["role"] == "tp")
+    assert sl["quantity"] == 0.06
+    assert tp["quantity"] == 0.06
+
+
+async def test_two_phase_sl_failure_after_fill_closes_entry() -> None:
+    """SL submit fails post-fill: entry closed with reverse MARKET, error raised."""
+    adapter = MockAdapter(fail_on={"sl"})
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket_two_phase(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+
+    with pytest.raises(BracketSubmissionError, match="two-phase SL failed"):
+        await _simulate_entry_fill(bm, bracket, filled_qty=0.1)
+
+    assert bracket.state == "failed"
+    # 2 submits: entry + abort_close (reverse MARKET)
+    assert len(adapter.submitted) == 2
+    abort = adapter.submitted[1]
+    assert abort["role"] == "abort_close"
+    assert abort["reduce_only"] is True
+
+
+async def test_two_phase_oco_after_arming_works_normally() -> None:
+    """Once armed via two-phase, OCO (TP fill → SL cancel) works identically."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket_two_phase(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+    await _simulate_entry_fill(bm, bracket, filled_qty=0.1)
+    assert bracket.state == "armed"
+
+    result = await bm.on_order_filled(bracket.tp_order_id)  # type: ignore[arg-type]
+    assert result is bracket
+    assert bracket.state == "completed"
+    assert bracket.exit_type == "tp"
+    assert bracket.sl_order_id in adapter.cancelled
 
 
 # ── Manual cancel ─────────────────────────────────────────────

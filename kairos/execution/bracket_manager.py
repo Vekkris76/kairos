@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from kairos.execution.policy import ExecutionContext, ExecutionPolicy, StaticPolicy
-from kairos.types import OrderSide
+from kairos.types import Fill, OrderSide
 
 if TYPE_CHECKING:
     from kairos.exchanges.base import ExchangeAdapter
@@ -62,6 +62,11 @@ class Bracket:
     state: Literal["pending", "armed", "completed", "failed"] = "pending"
     exit_type: Literal["tp", "sl", "manual"] | None = None
     failure_reason: str | None = None
+    # Populated when the entry fill is observed via ``on_order_filled``.
+    # ``quantity`` above is rewritten to match ``filled_qty`` on partial
+    # fills so downstream code (cancel, introspection) reflects reality.
+    filled_qty: float | None = None
+    filled_price: float | None = None
 
 
 class BracketSubmissionError(RuntimeError):
@@ -247,13 +252,27 @@ class BracketManager:
 
     # ── OCO on fill ────────────────────────────────────────────────
 
-    async def on_order_filled(self, order_id: str) -> Bracket | None:
+    async def on_order_filled(self, fill: Fill | str) -> Bracket | None:
         """Process a fill notification. If the order is an SL/TP leg of a
         bracket, cancel the sibling leg.
+
+        Accepts either a ``Fill`` object (preferred — carries
+        ``quantity`` + ``price`` so partial entry fills can be
+        reflected back onto the Bracket) or a raw ``order_id`` string
+        (legacy path kept for callers that only have the id at hand).
 
         Returns the affected Bracket (now ``completed``) or None if the
         order is not part of a bracket.
         """
+        if isinstance(fill, Fill):
+            order_id = fill.order_id
+            filled_qty: float | None = fill.quantity
+            filled_price: float | None = fill.price
+        else:
+            order_id = fill
+            filled_qty = None
+            filled_price = None
+
         bid = self._order_to_bracket.get(order_id)
         if bid is None:
             return None
@@ -265,7 +284,26 @@ class BracketManager:
 
         # Entry filled: nothing to OCO; SL/TP already armed
         if order_id == bracket.entry_order_id:
-            logger.debug(f"Bracket {bid}: entry filled, SL+TP remain armed")
+            bracket.filled_qty = filled_qty
+            bracket.filled_price = filled_price
+            # NOTE: SL and TP were already submitted with the original
+            # quantity. Updating bracket.quantity here so cancel_bracket
+            # and future introspection reflect the actual filled size.
+            # Re-arming SL/TP with corrected qty is out of scope for
+            # this fix — it would require cancelling and re-submitting
+            # both legs, which risks a window of unprotected exposure.
+            if filled_qty is not None and filled_qty != bracket.quantity:
+                logger.info(
+                    f"Bracket {bid}: partial fill detected — "
+                    f"requested={bracket.quantity}, filled={filled_qty}. "
+                    f"bracket.quantity updated; SL/TP remain at original size."
+                )
+                bracket.quantity = filled_qty
+            logger.debug(
+                f"Bracket {bid}: entry filled "
+                f"({filled_qty if filled_qty is not None else 'qty unknown'}), "
+                f"SL+TP remain armed"
+            )
             return None
 
         # SL or TP filled — cancel the sibling

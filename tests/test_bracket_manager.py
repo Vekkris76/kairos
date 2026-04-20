@@ -9,7 +9,7 @@ from kairos.execution.bracket_manager import (
     BracketManager,
     BracketSubmissionError,
 )
-from kairos.types import Order, OrderSide, OrderStatus, OrderType, TimeInForce
+from kairos.types import Fill, Order, OrderSide, OrderStatus, OrderType, TimeInForce
 
 
 pytestmark = pytest.mark.asyncio
@@ -248,6 +248,121 @@ async def test_unknown_order_id_returns_none() -> None:
     bm = BracketManager(adapter=adapter)
     result = await bm.on_order_filled("not-a-bracket-order")
     assert result is None
+
+
+# ── Partial fill ──────────────────────────────────────────────
+
+
+async def test_partial_entry_fill_updates_bracket_quantity() -> None:
+    """Entry partially filled: bracket.quantity updated to filled_qty."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+    assert bracket.quantity == 0.1
+
+    # Simulate a partial fill: only 0.06 of 0.1 was filled
+    partial_fill = Fill(
+        order_id=bracket.entry_order_id,
+        trade_id="trade-001",
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        price=50_050.0,
+        quantity=0.06,           # ← partial
+        commission=0.0001,
+        timestamp=1_700_000_000_000,
+    )
+    result = await bm.on_order_filled(partial_fill)
+
+    # Entry fill: bracket stays armed (not completed)
+    assert result is None
+    assert bracket.state == "armed"
+    # Quantity updated to actual filled amount
+    assert bracket.filled_qty == 0.06
+    assert bracket.filled_price == 50_050.0
+    assert bracket.quantity == 0.06   # bracket.quantity reflects reality
+
+
+async def test_full_entry_fill_with_fill_object() -> None:
+    """Full fill via Fill object: same behaviour as str path."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+    full_fill = Fill(
+        order_id=bracket.entry_order_id,
+        trade_id="trade-002",
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        price=50_000.0,
+        quantity=0.1,            # ← full fill
+        commission=0.0001,
+        timestamp=1_700_000_001_000,
+    )
+    result = await bm.on_order_filled(full_fill)
+    assert result is None
+    assert bracket.state == "armed"
+    assert bracket.filled_qty == 0.1
+    assert bracket.quantity == 0.1   # unchanged
+
+
+async def test_tp_fill_via_fill_object_completes_bracket() -> None:
+    """OCO via Fill object: TP fill cancels SL and completes bracket."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+    tp_fill = Fill(
+        order_id=bracket.tp_order_id,
+        trade_id="trade-003",
+        symbol="BTCUSDC",
+        side=OrderSide.SELL,
+        price=52_000.0,
+        quantity=0.1,
+        commission=0.0001,
+        timestamp=1_700_000_002_000,
+    )
+    result = await bm.on_order_filled(tp_fill)
+    assert result is bracket
+    assert bracket.state == "completed"
+    assert bracket.exit_type == "tp"
+    assert bracket.sl_order_id in adapter.cancelled
+
+
+async def test_backward_compat_str_order_id_still_works() -> None:
+    """Legacy str path (used by existing tests) still works after refactor."""
+    adapter = MockAdapter()
+    bm = BracketManager(adapter=adapter)
+    bracket = await bm.submit_bracket(
+        symbol="BTCUSDC",
+        side=OrderSide.BUY,
+        quantity=0.1,
+        sl_price=49_000,
+        tp_price=52_000,
+        reference_price=50_000,
+    )
+    # Pass raw string — simulates old callers
+    result = await bm.on_order_filled(bracket.tp_order_id)  # type: ignore[arg-type]
+    assert result is bracket
+    assert bracket.state == "completed"
 
 
 # ── Manual cancel ─────────────────────────────────────────────

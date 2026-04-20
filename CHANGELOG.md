@@ -2,6 +2,23 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [Unreleased]
+
+Held on `main` — will ship as **0.3.5** once the two-phase bracket API
+lands in the same release (so downstream `trading-autopilot` picks up
+both fixes in one dependency bump + one Docker rebuild).
+
+### Added
+
+- `BracketManager.on_order_filled` now accepts a `Fill | str`. When a
+  `Fill` is passed and the leg is the entry, `Bracket.filled_qty` +
+  `Bracket.filled_price` are populated and `Bracket.quantity` is
+  rewritten to the actual filled amount on partial fills. SL/TP remain
+  armed at the original size (re-arming on partial fills is out of
+  scope — it would open a window of unprotected exposure). Legacy
+  `str` path preserved for existing callers. Prep-work for the
+  upcoming two-phase bracket API.
+
 ## [0.3.4] — 2026-04-18 — *Release-hygiene scaffolding*
 
 ### Added

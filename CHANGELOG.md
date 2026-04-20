@@ -2,6 +2,29 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.6] — 2026-04-20 — *Guarded two-phase bracket helper*
+
+### Added
+
+- `LiveStrategy._submit_bracket_two_phase_guarded` — two-phase
+  counterpart of `_submit_bracket_guarded`. Same `_lifecycle_gate`
+  check (BUY-only, SELL bypasses, `force=True` bypasses,
+  exception fails closed) but delegates to
+  `bracket_manager.submit_bracket_two_phase(...)` so strategies
+  can opt into partial-fill-aware SL/TP sizing without bypassing
+  the F1 footgun guard.
+
+### Why this ships as 0.3.6 (not part of 0.3.5)
+
+0.3.5 added the `BracketManager.submit_bracket_two_phase` primitive
+but no guarded wrapper. Downstream strategies either had to
+replicate the gate check inline (easy to drift) or call
+`bracket_manager.submit_bracket_two_phase` unguarded (the exact F1
+vector the single-phase gate was introduced to close). Surfaced
+during the DonchianTrend wiring effort in trading-autopilot — the
+guarded helper keeps the host's `lifecycle_gate` contract intact
+along the two-phase path.
+
 ## [0.3.5] — 2026-04-20 — *Two-phase bracket + partial-fill awareness*
 
 ### Added

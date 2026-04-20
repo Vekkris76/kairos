@@ -355,6 +355,69 @@ class LiveStrategy(Actor):
             reference_price=reference_price,
         )
 
+    async def _submit_bracket_two_phase_guarded(
+        self,
+        *,
+        symbol: str,
+        side: Any,
+        quantity: float,
+        sl_price: float,
+        tp_price: float,
+        reference_price: float,
+        force: bool = False,
+    ) -> Any:
+        """Two-phase bracket counterpart of ``_submit_bracket_guarded``.
+
+        Gates BUY brackets on ``self._lifecycle_gate`` and delegates
+        to ``self.bracket_manager.submit_bracket_two_phase(...)``, which
+        submits the entry now and arms SL+TP on the entry fill using
+        the real ``filled_qty`` (see Kairos 0.3.5 CHANGELOG). SELL
+        brackets and ``force=True`` pass through. Returns None when
+        gated out or when the bracket manager is not wired.
+
+        Use when partial fills are a real risk (LIMIT entries or
+        illiquid books). For MARKET entries on liquid pairs the
+        single-phase ``_submit_bracket_guarded`` is equivalent and
+        simpler.
+        """
+        from kairos.types import OrderSide
+
+        log = getattr(self, "log", _submit_logger)
+
+        if self.bracket_manager is None:
+            log.warning(
+                "_submit_bracket_two_phase_guarded: no bracket_manager wired"
+            )
+            return None
+
+        if (
+            not force
+            and side == OrderSide.BUY
+            and self._lifecycle_gate is not None
+        ):
+            try:
+                allowed = bool(self._lifecycle_gate())
+            except Exception as exc:
+                log.warning(
+                    f"Bracket gate raised: {exc} — failing closed"
+                )
+                return None
+            if not allowed:
+                log.info(
+                    f"Bracket gated (two-phase): not CHAMPION — dropping BUY "
+                    f"{quantity} {symbol} @ {reference_price}"
+                )
+                return None
+
+        return await self.bracket_manager.submit_bracket_two_phase(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            reference_price=reference_price,
+        )
+
     async def buy_bracket_pct(
         self,
         pct_of_balance: float,

@@ -58,15 +58,20 @@ class _RecordingAdapter:
 
 
 class _FakeBracketManager:
-    """Holds the adapter + a submit_bracket stub."""
+    """Holds the adapter + submit_bracket + submit_bracket_two_phase stubs."""
 
     def __init__(self, adapter: _RecordingAdapter) -> None:
         self._adapter = adapter
         self.bracket_calls: list[dict] = []
+        self.two_phase_calls: list[dict] = []
 
     async def submit_bracket(self, **kwargs):
         self.bracket_calls.append(kwargs)
         return {"entry_order_id": "mock-entry"}
+
+    async def submit_bracket_two_phase(self, **kwargs):
+        self.two_phase_calls.append(kwargs)
+        return {"entry_order_id": "mock-entry-tp", "state": "pending_fill"}
 
 
 def _make_strategy(
@@ -193,3 +198,86 @@ async def test_bracket_gate_false_passes_sell():
     )
     assert result is not None
     assert len(bracket.bracket_calls) == 1
+
+
+# ── _submit_bracket_two_phase_guarded ────────────────────────────
+
+
+async def test_bracket_two_phase_gate_false_blocks_buy():
+    strat, _, bracket = _make_strategy(gate=lambda: False)
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.001,
+        sl_price=68000, tp_price=75000, reference_price=70000,
+    )
+    assert result is None
+    assert bracket.two_phase_calls == []
+    assert bracket.bracket_calls == []
+
+
+async def test_bracket_two_phase_gate_true_allows_buy():
+    strat, _, bracket = _make_strategy(gate=lambda: True)
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.001,
+        sl_price=68000, tp_price=75000, reference_price=70000,
+    )
+    assert result is not None
+    assert len(bracket.two_phase_calls) == 1
+    assert bracket.bracket_calls == []   # single-phase NOT used
+
+
+async def test_bracket_two_phase_gate_none_allows_buy():
+    strat, _, bracket = _make_strategy(gate=None)
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.001,
+        sl_price=68000, tp_price=75000, reference_price=70000,
+    )
+    assert result is not None
+    assert len(bracket.two_phase_calls) == 1
+
+
+async def test_bracket_two_phase_gate_false_passes_sell():
+    """Sell two-phase brackets are liability-reducing — gate bypassed."""
+    strat, _, bracket = _make_strategy(gate=lambda: False)
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.SELL, quantity=0.001,
+        sl_price=72000, tp_price=68000, reference_price=70000,
+    )
+    assert result is not None
+    assert len(bracket.two_phase_calls) == 1
+
+
+async def test_bracket_two_phase_no_manager_returns_none():
+    """Safety: missing bracket_manager returns None without crashing."""
+    strat = LiveStrategy(ActorConfig())
+    strat.bracket_manager = None
+    strat._lifecycle_gate = None
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.001,
+        sl_price=68000, tp_price=75000, reference_price=70000,
+    )
+    assert result is None
+
+
+async def test_bracket_two_phase_gate_exception_fails_closed():
+    """Gate callback raising an exception must block the submit."""
+    def bad_gate() -> bool:
+        raise RuntimeError("gate internal error")
+
+    strat, _, bracket = _make_strategy(gate=bad_gate)
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.001,
+        sl_price=68000, tp_price=75000, reference_price=70000,
+    )
+    assert result is None
+    assert bracket.two_phase_calls == []
+
+
+async def test_bracket_two_phase_force_bypasses_gate():
+    strat, _, bracket = _make_strategy(gate=lambda: False)
+    result = await strat._submit_bracket_two_phase_guarded(
+        symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.001,
+        sl_price=68000, tp_price=75000, reference_price=70000,
+        force=True,
+    )
+    assert result is not None
+    assert len(bracket.two_phase_calls) == 1

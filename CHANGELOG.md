@@ -2,22 +2,42 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
-## [Unreleased]
-
-Held on `main` — will ship as **0.3.5** once the two-phase bracket API
-lands in the same release (so downstream `trading-autopilot` picks up
-both fixes in one dependency bump + one Docker rebuild).
+## [0.3.5] — 2026-04-20 — *Two-phase bracket + partial-fill awareness*
 
 ### Added
 
-- `BracketManager.on_order_filled` now accepts a `Fill | str`. When a
+- `BracketManager.submit_bracket_two_phase`: submits only the entry at
+  call time; SL and TP are armed by `on_order_filled` when the entry
+  fill arrives, sized to the actual `filled_qty` (not the requested
+  quantity). Eliminates SL/TP over-sizing on partial fills. For MARKET
+  entries on liquid pairs `submit_bracket` remains equivalent and
+  simpler; use the two-phase variant for LIMIT entries or illiquid
+  books where partial fills are a real risk.
+- New `Bracket.state = "pending_fill"` lifecycle state, plus
+  `Bracket.two_phase: bool` + internal `_sl_price_pending` /
+  `_tp_price_pending` that buffer the exit prices until the fill
+  arrives.
+
+### Changed
+
+- `BracketManager.on_order_filled` now accepts `Fill | str`. When a
   `Fill` is passed and the leg is the entry, `Bracket.filled_qty` +
   `Bracket.filled_price` are populated and `Bracket.quantity` is
-  rewritten to the actual filled amount on partial fills. SL/TP remain
-  armed at the original size (re-arming on partial fills is out of
-  scope — it would open a window of unprotected exposure). Legacy
-  `str` path preserved for existing callers. Prep-work for the
-  upcoming two-phase bracket API.
+  rewritten to the actual filled amount on partial fills (SL and TP
+  for single-phase brackets remain at their original size — re-arming
+  them would open a window of unprotected exposure). Legacy `str`
+  path preserved for existing callers.
+
+### Notes on wiring
+
+`on_order_filled` awaits `_arm_exits` directly so failures propagate
+via `BracketSubmissionError` and `bracket.state` is deterministic
+when the hook returns. The live engine's `_route` currently calls
+`actor.on_order_filled` without `await` — any strategy wiring the
+two-phase bracket to a v3 actor must add an async bridge (e.g.
+`asyncio.create_task` in the actor hook) until `_route` grows
+coroutine-await support. That wiring lands in a separate
+`trading-autopilot` PR, not here.
 
 ## [0.3.4] — 2026-04-18 — *Release-hygiene scaffolding*
 

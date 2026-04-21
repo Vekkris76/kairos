@@ -225,6 +225,37 @@ class LiveEngine:
                 logger.error(f"Adapter {adapter.venue_id} connect failed: {exc}")
                 # Continue with degraded state — strategies will get no events
 
+        # 1b. Ingest instrument metadata so strategies can read
+        # min_notional, qty_step, price_precision, etc. via
+        # ``self.cache.instrument(symbol)`` without a separate async
+        # round-trip per strategy. We try each adapter in order and
+        # keep the first non-erroring Instrument per symbol; a failure
+        # logs a warning but never aborts the connect sequence (the
+        # cache stays empty for that symbol and strategies can fall
+        # back to whatever default they use today).
+        _unique_symbols = {sym for sym, _tf in self._strategy_subscriptions}
+        for symbol in sorted(_unique_symbols):
+            if self.cache.instrument(symbol) is not None:
+                continue
+            for adapter in self._adapters:
+                try:
+                    inst = await adapter.get_instrument(symbol)
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not ingest instrument {symbol} from "
+                        f"{getattr(adapter, 'venue_id', type(adapter).__name__)}: "
+                        f"{exc}"
+                    )
+                    continue
+                if inst is None:
+                    continue
+                self.cache.ingest_instruments([inst])
+                logger.debug(
+                    f"Instrument ingested: {symbol} "
+                    f"min_notional={inst.min_notional}"
+                )
+                break
+
         # 2. Subscribe adapters to strategy streams
         for symbol, timeframe in self._strategy_subscriptions:
             for adapter in self._adapters:

@@ -2,6 +2,34 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.3.7] — 2026-04-21 — *Instrument metadata ingested on connect*
+
+### Changed
+
+- `LiveEngine.run()` now ingests instrument metadata
+  (`min_notional`, `qty_step`, `price_precision`, etc.) into
+  `MarketCache` immediately after each adapter connects, before bar
+  subscriptions start. Strategies can read per-symbol instrument
+  specs via `self.cache.instrument(symbol)` without a separate async
+  round-trip at `on_start`. Previously `MarketCache.ingest_instruments()`
+  was never called at runtime — only in tests — so
+  `self.cache.instrument(symbol)` always returned `None` for live
+  strategies.
+
+### Migration
+
+Consumers that worked around the missing cache (e.g. a `MinNotionalMixin`
+calling `adapter.get_instrument()` manually from `on_start`) can now
+switch to `self.cache.instrument(symbol)`. The workaround remains
+valid — this change is additive and non-breaking.
+
+### Safety
+
+Each `get_instrument` call is wrapped in `try/except`. A failure logs a
+warning but never aborts the connect sequence; the cache stays empty
+for that symbol, letting downstream strategies fall back to their
+previous defaults.
+
 ## [0.3.6] — 2026-04-20 — *Guarded two-phase bracket helper*
 
 ### Added

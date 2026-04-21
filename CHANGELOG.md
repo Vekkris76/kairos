@@ -2,6 +2,25 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.4.0] — 2026-04-21 — *BybitLive adapter*
+
+### Added
+
+- `BybitLive` adapter (`kairos/adapters/bybit_live.py`) — full
+  `LiveAdapter` implementation against Bybit's v5 unified API for Spot.
+  REST (order create / cancel / wallet-balance / instruments-info /
+  open-orders) plus public market-data WS (klines) plus private WS
+  (fills + order updates). HMAC-SHA256 auth for REST; `GET/realtime`
+  signed handshake for the private WS. `testnet=True` supported.
+- `BybitLive` exported from `kairos.adapters` alongside `BinanceLive`.
+
+### Notes
+
+- No breaking changes. `BinanceLive` unchanged.
+- Bar emission on `kline.*` frames is gated on `confirm == true` to
+  avoid double-counting still-forming candles.
+- Bybit testnet keys available at [testnet.bybit.com](https://testnet.bybit.com).
+
 ## [0.3.7] — 2026-04-21 — *Instrument metadata ingested on connect*
 
 ### Changed

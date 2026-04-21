@@ -317,3 +317,106 @@ async def test_cannot_register_adapter_when_running() -> None:
         engine.register_adapter(adapter)
     engine.stop()
     await task
+
+
+# ── Instrument ingestion on connect ─────────────────────────────
+
+
+async def test_instruments_ingested_after_connect() -> None:
+    """After engine.run() connects the adapter, cache.instrument(symbol)
+    returns a real Instrument — not None. Enables strategies to read
+    min_notional / qty_step per symbol without their own async prime."""
+    cache = MarketCache()
+    engine = LiveEngine(clock=TestClock(), cache=cache)
+    adapter = MockAdapter()
+    engine.register_adapter(adapter)
+
+    strategy = _RecordingStrategy(ActorConfig())
+    strategy.symbol = "BTCUSDC"
+    strategy.timeframe = "15m"
+    engine.add_strategy(strategy)
+
+    task = asyncio.create_task(engine.run())
+    await asyncio.sleep(0.05)
+
+    inst = cache.instrument("BTCUSDC")
+    assert inst is not None, "instrument should be in cache after connect"
+    assert inst.symbol == "BTCUSDC"
+    assert inst.min_notional > 0
+    assert inst.min_qty > 0
+
+    engine.stop()
+    await task
+
+
+async def test_instrument_ingestion_failure_does_not_abort_connect() -> None:
+    """If adapter.get_instrument raises, engine.run() still completes
+    (warning logged, cache stays empty for that symbol)."""
+    cache = MarketCache()
+    engine = LiveEngine(clock=TestClock(), cache=cache)
+    adapter = MockAdapter()
+
+    async def failing_get_instrument(symbol: str):
+        raise RuntimeError("exchange unavailable")
+
+    adapter.get_instrument = failing_get_instrument  # type: ignore[method-assign]
+    engine.register_adapter(adapter)
+
+    strategy = _RecordingStrategy(ActorConfig())
+    strategy.symbol = "BTCUSDC"
+    strategy.timeframe = "15m"
+    engine.add_strategy(strategy)
+
+    task = asyncio.create_task(engine.run())
+    await asyncio.sleep(0.05)
+
+    # Engine boot succeeded — subscriptions still wired
+    assert ("BTCUSDC", "15m") in adapter.subscriptions
+    # Cache empty for the symbol — acceptable degraded state
+    assert cache.instrument("BTCUSDC") is None
+
+    engine.stop()
+    await task
+
+
+async def test_multiple_symbols_all_ingested() -> None:
+    """All subscribed symbols are ingested — not just the first."""
+    cache = MarketCache()
+    engine = LiveEngine(clock=TestClock(), cache=cache)
+    adapter = MockAdapter()
+
+    # MockAdapter's default get_instrument hardcodes base="BTC". Replace
+    # it with a per-symbol-aware stub so the multi-symbol assertion
+    # below is meaningful.
+    async def get_instrument_per_symbol(symbol: str) -> Instrument:
+        base = symbol.replace("USDC", "")
+        return Instrument(
+            symbol=symbol, base=base, quote="USDC",
+            min_qty=0.00001, max_qty=9000, qty_step=0.00001,
+            min_notional=10.0, price_precision=2, qty_precision=5,
+        )
+    adapter.get_instrument = get_instrument_per_symbol  # type: ignore[method-assign]
+    engine.register_adapter(adapter)
+
+    btc_strat = _RecordingStrategy(ActorConfig())
+    btc_strat.symbol = "BTCUSDC"
+    btc_strat.timeframe = "4h"
+    engine.add_strategy(btc_strat)
+
+    eth_strat = _RecordingStrategy(ActorConfig())
+    eth_strat.symbol = "ETHUSDC"
+    eth_strat.timeframe = "4h"
+    engine.add_strategy(eth_strat)
+
+    task = asyncio.create_task(engine.run())
+    await asyncio.sleep(0.05)
+
+    btc = cache.instrument("BTCUSDC")
+    eth = cache.instrument("ETHUSDC")
+    assert btc is not None
+    assert eth is not None
+    assert btc.base == "BTC"
+    assert eth.base == "ETH"
+
+    engine.stop()
+    await task

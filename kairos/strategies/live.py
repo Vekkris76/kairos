@@ -542,6 +542,15 @@ class LiveStrategy(Actor):
             order_ref=order_ref,
             reason=reason,
             ts_ns=time.time_ns(),
+            # Populated so downstream ASL gates can uniquely identify
+            # the (strategy, symbol, timeframe) tuple. Pre-v0.4.1 this
+            # was empty, which forced lifecycle lookups to a
+            # strategy-only fallback that collapsed divergent states
+            # across timeframes. If ``self.timeframe`` is unset (some
+            # legacy strategies leave it ""), the signal falls back
+            # to an empty string — downstream consumers treat that as
+            # "no timeframe info" and degrade gracefully.
+            timeframe=self.timeframe,
         )
 
         asyncio.create_task(

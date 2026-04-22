@@ -139,6 +139,9 @@ async def test_emit_signal_publishes_to_bus() -> None:
     assert event.sl_atr_mult == 2.0
     assert event.reason == "bar #1"
     assert event.ts_ns > 0
+    # v0.4.1 — timeframe propagated from the strategy's self.timeframe
+    # so downstream ASL gates can identify the full tuple.
+    assert event.timeframe == "15m"
 
     engine.stop()
     try:
@@ -174,6 +177,42 @@ async def test_emit_signal_sets_strategy_name_from_class() -> None:
 
     _, event = await asyncio.wait_for(sub.queue.get(), timeout=1.0)
     assert event.strategy == "dcasignal"
+
+    engine.stop()
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        task.cancel()
+
+
+async def test_emit_signal_timeframe_default_empty_when_unset() -> None:
+    """If the strategy leaves ``self.timeframe`` default ("") the signal
+    carries "" too — downstream consumers (ASL gates) treat that as
+    "no timeframe info" and degrade to strategy-only lookup."""
+
+    class NoTimeframeStrategy(LiveStrategy):
+        def on_bar_ready(self, bar) -> None:   # noqa: ANN001
+            self.emit_signal("buy_bracket", pct_of_capital=0.05)
+
+    s = NoTimeframeStrategy(ActorConfig())
+    s.symbol = "BTCUSDC"
+    # deliberately leave s.timeframe = "" (class default)
+
+    engine = LiveEngine(clock=TestClock())
+    engine.add_strategy(s)
+    sub = engine.event_bus.subscribe(["strategy_signal"], name="capture")
+
+    task = asyncio.create_task(engine.run())
+    await asyncio.sleep(0.05)
+    from kairos.types import Bar
+    await engine.event_bus.publish(
+        "bar",
+        Bar(symbol="BTCUSDC", timeframe="", timestamp=0,
+            open=1, high=1, low=1, close=1, volume=1),
+    )
+    await asyncio.sleep(0.05)
+    _, event = await asyncio.wait_for(sub.queue.get(), timeout=1.0)
+    assert event.timeframe == ""
 
     engine.stop()
     try:

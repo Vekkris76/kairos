@@ -172,3 +172,10 @@ class StrategySignal:
     order_ref: str | None = None
     reason: str = ""
     ts_ns: int = 0
+    # The (strategy, symbol, timeframe) tuple uniquely identifies a
+    # strategy instance in the Autonomous Strategy Lifecycle. Prior to
+    # v0.4.1 the timeframe was missing, which forced downstream ASL
+    # gates to fall back to a (strategy, symbol) match that collapsed
+    # divergent lifecycle states across timeframes. See openspec
+    # archive 2026-04-22-saas-runtime-contracts D34#3.
+    timeframe: str = ""

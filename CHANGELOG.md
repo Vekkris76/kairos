@@ -2,6 +2,41 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.4.1] — 2026-04-22 — *StrategySignal.timeframe*
+
+### Added
+
+- `StrategySignal` dataclass (`kairos.types`) gains a `timeframe: str`
+  field (default `""`). `LiveStrategy.emit_signal()` populates it
+  from `self.timeframe` so downstream consumers (typically an
+  Autonomous Strategy Lifecycle gate in a multi-tenant trading
+  dispatcher) can identify the full `(strategy, symbol, timeframe)`
+  tuple.
+- `kairos.__version__` now tracks `pyproject.toml`'s
+  `project.version` (was stale at `"0.3.1"` for several releases).
+
+### Why
+
+Downstream trading-autopilot ASL gates had to collapse multi-tuple
+strategy state because the signal carried only `(strategy, symbol)`.
+When a strategy's lifecycle state diverged across timeframes
+(e.g. `dca_signal` CHAMPION on BTC-4h AND RETIRED on ETH-1d), the
+first tuple-match "won" regardless of which tuple the signal came
+from. Adding `timeframe` lets the gate do a precise
+`state_for_tuple()` lookup. See openspec archive
+`2026-04-22-saas-runtime-contracts` D34#3.
+
+### Compatibility
+
+- Additive: old consumers that inspect known fields on
+  `StrategySignal` keep working.
+- Strategies that leave `self.timeframe` unset (class default `""`)
+  emit `timeframe=""`; downstream consumers treat that as "no
+  timeframe info" and degrade to strategy-only lookup (the
+  pre-0.4.1 behaviour).
+- No breaking changes to `BinanceLive` / `BybitLive` / other
+  adapters.
+
 ## [0.4.0] — 2026-04-21 — *BybitLive adapter*
 
 ### Added

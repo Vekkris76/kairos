@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from kairos.execution.policy import ExecutionContext, ExecutionPolicy, StaticPolicy
-from kairos.types import Fill, OrderSide
+from kairos.types import Fill, OrderSide, OrderStatus
 
 if TYPE_CHECKING:
     from kairos.exchanges.base import ExchangeAdapter
@@ -281,6 +281,11 @@ class BracketManager:
                 reference_price=reference_price,
             )
         )
+        # Lazy import to avoid a top-level cycle (exchanges/* doesn't depend
+        # on execution/*; this is the only spot where the dependency goes
+        # the other way).
+        from kairos.exchanges.exceptions import OrderSubmissionError
+
         try:
             entry_order = await self._adapter.submit_order(
                 symbol=symbol,
@@ -292,6 +297,23 @@ class BracketManager:
                 time_in_force=entry_decision.time_in_force,
                 post_only=entry_decision.post_only,
             )
+            # Defence-in-depth: a non-conforming adapter may return
+            # ``Order(id="", status=REJECTED)`` instead of raising
+            # ``OrderSubmissionError``. Refuse to persist a half-baked
+            # bracket whose entry never actually reached the venue.
+            if entry_order.status == OrderStatus.REJECTED:
+                bracket.state = "failed"
+                bracket.failure_reason = (
+                    f"entry_submit: REJECTED by adapter (id={entry_order.id!r})"
+                )
+                logger.error(
+                    f"Bracket {bid}: entry rejected by adapter "
+                    f"(status=REJECTED, id={entry_order.id!r})"
+                )
+                raise BracketSubmissionError(
+                    f"Bracket {bid}: entry rejected by adapter "
+                    f"(status=REJECTED, id={entry_order.id!r})"
+                )
             bracket.entry_order_id = entry_order.id
             self._order_to_bracket[entry_order.id] = bid
             bracket.state = "pending_fill"
@@ -299,6 +321,16 @@ class BracketManager:
                 f"Bracket {bid}: entry submitted two-phase "
                 f"({entry_order.id}); SL/TP armed on fill"
             )
+        except OrderSubmissionError as exc:
+            bracket.state = "failed"
+            bracket.failure_reason = f"entry_submit: {exc}"
+            logger.error(f"Bracket {bid}: entry submission failed: {exc}")
+            raise BracketSubmissionError(
+                f"Bracket {bid}: entry submission failed: {exc}"
+            ) from exc
+        except BracketSubmissionError:
+            # Already-typed defence-in-depth path above; re-raise unchanged.
+            raise
         except Exception as exc:
             bracket.state = "failed"
             bracket.failure_reason = f"entry_submit: {exc}"

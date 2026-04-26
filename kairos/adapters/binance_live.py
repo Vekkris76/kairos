@@ -178,6 +178,10 @@ class BinanceLive:
             api_secret=self._api_secret,
             testnet=self._testnet,
         )
+        # Propagate any callback registered before connect() so the
+        # freshly-constructed inner adapter shares the same slot. RC1.
+        if self._on_fill is not None:
+            self._rest._fill_callback = self._on_fill
         await self._rest.connect()
 
         self._market_ws = BinanceWebSocket()
@@ -258,6 +262,12 @@ class BinanceLive:
 
     def set_fill_callback(self, callback: FillCallback) -> None:
         self._on_fill = callback
+        # Propagate to the inner REST adapter so MARKET orders that fill
+        # instantly at submit time (BinanceAdapter.submit_order returning
+        # status="closed") still surface a Fill via this callback. RC1
+        # regression fix — see openspec/changes/archive/...
+        if self._rest is not None:
+            self._rest._fill_callback = callback
 
     def set_order_update_callback(self, callback: OrderUpdateCallback) -> None:
         self._on_order_update = callback

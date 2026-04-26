@@ -7,7 +7,7 @@ layer on top: adaptivity. See https://github.com/Vekkris76/kairos for the full v
 Renamed from `autopilot-engine` at v0.2.0a0.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 from kairos.engine import Engine
 from kairos.strategy import Strategy

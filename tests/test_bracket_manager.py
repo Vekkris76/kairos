@@ -568,3 +568,68 @@ async def test_bracket_for_order_resolves_legs() -> None:
     assert bm.bracket_for_order(bracket.sl_order_id) is bracket  # type: ignore[arg-type]
     assert bm.bracket_for_order(bracket.tp_order_id) is bracket  # type: ignore[arg-type]
     assert bm.bracket_for_order("nope") is None
+
+
+# ── RC3 defence-in-depth: BracketManager rejects bad entries ─────
+
+
+class _RaisingAdapter:
+    """Adapter that raises OrderSubmissionError on every submit_order
+    (the conforming-adapter contract for submission failure)."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def submit_order(self, **kw):
+        from kairos.exchanges.exceptions import OrderSubmissionError
+        raise OrderSubmissionError("simulated rejection from venue")
+
+    async def cancel_order(self, *, symbol: str, order_id: str) -> bool:
+        self.cancelled.append(order_id)
+        return True
+
+
+class _SentinelReturningAdapter:
+    """Non-conforming adapter: returns Order(id="", status=REJECTED) on
+    failure instead of raising. The bracket manager's defence-in-depth
+    must catch this and refuse to persist the bracket."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def submit_order(self, **kw):
+        return Order(
+            id="",
+            symbol=kw["symbol"],
+            side=kw["side"],
+            type=kw["order_type"],
+            quantity=kw["quantity"],
+            status=OrderStatus.REJECTED,
+        )
+
+    async def cancel_order(self, *, symbol: str, order_id: str) -> bool:
+        self.cancelled.append(order_id)
+        return True
+
+
+async def test_two_phase_raises_when_adapter_raises_order_submission_error() -> None:
+    """Conforming-adapter path: OrderSubmissionError → BracketSubmissionError."""
+    adapter = _RaisingAdapter()
+    bm = BracketManager(adapter=adapter)
+    with pytest.raises(BracketSubmissionError):
+        await bm.submit_bracket_two_phase(
+            symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.1,
+            sl_price=49_000, tp_price=52_000, reference_price=50_000,
+        )
+
+
+async def test_two_phase_raises_when_adapter_returns_rejected_sentinel() -> None:
+    """Defence-in-depth: non-conforming adapter returning Order(status=REJECTED)
+    must NOT result in a persisted bracket with empty entry_order_id."""
+    adapter = _SentinelReturningAdapter()
+    bm = BracketManager(adapter=adapter)
+    with pytest.raises(BracketSubmissionError, match="REJECTED"):
+        await bm.submit_bracket_two_phase(
+            symbol="BTCUSDC", side=OrderSide.BUY, quantity=0.1,
+            sl_price=49_000, tp_price=52_000, reference_price=50_000,
+        )

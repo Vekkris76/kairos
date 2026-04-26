@@ -22,10 +22,10 @@
 
 - [x] 3.1 Bumped `version` in `pyproject.toml` from `0.4.1` to `0.4.2` (the proposal said 0.3.3→0.3.4 but the repo was already at 0.4.1; bumped to 0.4.2 instead). Also bumped `__version__` in `kairos/__init__.py` to keep the two in sync.
 - [x] 3.2 Added a `## [0.4.2]` section to `CHANGELOG.md` covering: callback propagation fix (RC1), `OrderSubmissionError` contract change (RC3, **breaking**), `BracketManager` defence-in-depth, with the migration code snippet for direct `BinanceAdapter` consumers.
-- [ ] 3.3 Open a PR titled `fix(adapters): propagate fill callbacks + raise on REJECTED (0.4.2)`. Link to the openspec change. Wait for CI green.
-- [ ] 3.4 After merge to `main`, create and push tag `v0.4.2`. Confirm the `release.yml` GitHub Actions workflow publishes `kairos-engine==0.4.2` to PyPI successfully.
-- [ ] 3.5 Verify the release: in a fresh venv, `pip install kairos-engine==0.4.2`, then run a 5-line sanity script asserting `BinanceLive(...).set_fill_callback(cb)` propagates to `_rest._fill_callback` after `await connect()`.
-- [ ] 3.6 Notify the trading-autopilot openspec (`recover-stuck-brackets-and-async-fill-wrapper`) that 0.4.2 is on PyPI and the dep bump is unblocked.
+- [x] 3.3 PR #3 opened, CI green on Python 3.11/3.12/3.13, merged via merge-commit (consistent with the repo's history of merge-commits on PRs #1 and #2). Branch `fix/bracket-fill-callback-pipeline-0.4.2` deleted post-merge.
+- [x] 3.4 Tag `v0.4.2` annotated + pushed. `release.yml` ran: `Pre-ship gate` ✓, `Publish to PyPI (trusted)` ✓ after manual environment approval. Run id 24950876510.
+- [x] 3.5 Sanity check in fresh venv: `pip install kairos-engine==0.4.2` succeeds, `BinanceLive.set_fill_callback(cb)` post-`_rest`-stub propagates to `_rest._fill_callback`, `OrderSubmissionError` is importable from `kairos.exchanges.exceptions`, `kairos.__version__ == "0.4.2"`.
+- [x] 3.6 trading-autopilot openspec `recover-stuck-brackets-and-async-fill-wrapper` is now unblocked. The change's task 0.1 prerequisite gate is satisfied — `pip index versions kairos-engine` shows `0.4.2`.
 
 ## 4. Archive
 

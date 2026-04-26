@@ -2,6 +2,71 @@
 
 All notable changes documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) + semver.
 
+## [0.4.2] — 2026-04-26 — *Bracket fill-callback pipeline + REJECTED handling*
+
+### Fixed
+
+- **RC1**: `BinanceLive.set_fill_callback(cb)` now propagates `cb` to
+  the inner `BinanceAdapter._fill_callback` slot (both immediately
+  when `_rest` already exists, and at `connect()` time when `_rest`
+  is freshly constructed). Pre-fix, MARKET orders that ccxt reported
+  as instantly filled at submit time silently dropped the synthesized
+  `Fill` because the inner slot was never wired. Downstream effect:
+  bracket managers stayed in `pending_fill` indefinitely despite
+  positions being open at the venue without SL/TP armed.
+- **Defence-in-depth**: `BracketManager.submit_bracket_two_phase` now
+  explicitly checks `entry_order.status == OrderStatus.REJECTED` and
+  raises `BracketSubmissionError` instead of persisting a bracket
+  with an empty `entry_order_id`. Catches non-conforming third-party
+  adapters that return a sentinel `Order` rather than raising.
+  `OrderSubmissionError` from a conforming adapter is now re-raised
+  as `BracketSubmissionError` so callers see a single exception type.
+
+### Changed — BREAKING
+
+- **RC3**: `BinanceAdapter.submit_order` now **raises**
+  `OrderSubmissionError` (new in `kairos.exchanges.exceptions`) on
+  any submission failure, instead of returning a sentinel
+  `Order(id="", status=REJECTED)` without raising. Callers that
+  previously inspected `.status` to detect failure must catch the
+  exception instead.
+
+  Migration for direct `BinanceAdapter` consumers:
+
+  ```python
+  # Before (0.4.1 and earlier)
+  order = await adapter.submit_order(...)
+  if order.status == OrderStatus.REJECTED:
+      handle_failure()
+
+  # After (0.4.2+)
+  from kairos.exchanges.exceptions import OrderSubmissionError
+  try:
+      order = await adapter.submit_order(...)
+  except OrderSubmissionError as exc:
+      handle_failure(exc)
+  ```
+
+  `BinanceLive` users see no surface change — the wrapper does not
+  expose the inner sentinel. `BybitLive.submit_order` already raised
+  on failure pre-0.4.2 and is unchanged.
+
+### Why
+
+Live diagnosis on a downstream consumer (trading-autopilot,
+2026-04-26) found 124 brackets stuck in `pending_fill` across 5
+users, despite the underlying entry orders having actually filled
+at the venue. Two distinct bugs in this engine — a callback
+non-propagation between the public `BinanceLive` adapter and its
+private `BinanceAdapter` REST wrapper, and a silent sentinel
+returned on submission failure — combined to make the bracket
+pipeline drift from venue state with no observable error. Today
+the impact is testnet-only (no real capital at risk), but it was
+a hard blocker for any real-capital activation through this
+engine. See openspec change
+`fix-bracket-fill-callback-and-rejected-handling` for full design
+context.
+
 ## [0.4.1] — 2026-04-22 — *StrategySignal.timeframe*
 
 ### Added

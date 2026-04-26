@@ -13,6 +13,7 @@ from typing import Callable
 import ccxt.async_support as ccxt
 
 from kairos.exchanges.base import ExchangeAdapter
+from kairos.exchanges.exceptions import OrderSubmissionError
 from kairos.types import (
     Balance, Bar, Fill, Instrument, Order,
     OrderSide, OrderStatus, OrderType, TimeInForce,
@@ -272,10 +273,7 @@ class BinanceAdapter(ExchangeAdapter):
 
         except Exception as e:
             logger.error(f"Order failed: {e}")
-            return Order(
-                id="", symbol=symbol, side=side, type=order_type,
-                quantity=quantity, status=OrderStatus.REJECTED,
-            )
+            raise OrderSubmissionError(str(e)) from e
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         try:
